@@ -19,6 +19,14 @@ def tagset_to_onehot(tagset):
     return tags
 
 
+def onehot_to_taglist(onehot):
+    taglist = []
+    for idx, tag in enumerate(TAGS):
+        if onehot[idx][1] == 1:
+            taglist.append(tag)
+    return taglist
+
+
 # def get_imgs_lbls(imgs_dir, lbls_path):
 #     nb_imgs = len(glob('%s/*.tif' % imgs_dir))
 #     scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1

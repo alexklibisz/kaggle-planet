@@ -7,7 +7,7 @@ from keras.optimizers import Adam
 from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda
 from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
 from os import path, mkdir
 import argparse
 import logging
@@ -17,9 +17,52 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_onehot
+from planet.utils.data_utils import tagset_to_onehot, TAGS
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
+
+
+class SamplePlot(Callback):
+
+    def __init__(self, batch_gen, file_name):
+        super(Callback, self).__init__()
+        self.logs = {}
+        self.batch_gen = batch_gen
+        self.file_name = file_name
+
+    def on_train_begin(self, logs={}):
+        self.logs = {}
+
+    def on_epoch_end(self, epoch, logs={}):
+
+        import matplotlib
+        matplotlib.use('agg')
+        import matplotlib.pyplot as plt
+
+        imgs_batch, [tags_batch, dist_batch] = next(self.batch_gen)
+        tag_preds, dist_preds = model.net.predict(imgs_batch)
+
+        nrows, ncols = min(len(imgs_batch), 10), 2
+        fig, _ = plt.subplots(nrows, ncols, figsize=(8, nrows * 2.5))
+        barleft = np.arange(0, len(dist_preds[0]))
+        barticks = [t[:5] for t in TAGS]
+
+        for idx, (img, dist_true, dist_pred) in enumerate(zip(imgs_batch, dist_batch, dist_preds)):
+            if idx >= nrows:
+                break
+            ax1, ax2 = fig.axes[idx * 2 + 0], fig.axes[idx * 2 + 1]
+            ax1.axis('off')
+            ax1.imshow(img[:, :, :3])
+            ax2.bar(barleft, dist_true, color='blue', alpha=0.3, label='True')
+            ax2.bar(barleft, dist_pred, color='red', alpha=0.3, label='Pred')
+            ax2.set_xticks(barleft)
+            ax2.set_xticklabels(barticks, rotation='vertical')
+            ax2.legend()
+
+        plt.subplots_adjust(hspace=0.5)
+        plt.suptitle('Epoch %d' % (epoch + 1))
+        plt.savefig(self.file_name)
+        plt.close()
 
 
 class VGGNet(object):
@@ -31,7 +74,7 @@ class VGGNet(object):
             'input_shape': [256, 256, 4],
             'output_shape': [17, 2],
             'batch_size': 20,
-            'nb_epochs': 100,
+            'nb_epochs': 200,
         }
 
         self.checkpoint_name = checkpoint_name
@@ -84,19 +127,20 @@ class VGGNet(object):
         tags = x = Reshape(self.config['output_shape'], name='tags')(x)
 
         # Secondary output outputs the normalized probability distribution to be measured
-        # against the true probability distribution via KL-divergence loss.
+        # against the true probability distribution via KL-divergence loss. Have to do
+        # some gross reshaping to get the element-wise division correct.
         def to_distribution(tags_onehot):
+            b, t = self.config['batch_size'], self.config['output_shape'][0]
             tags = K.cast(K.argmax(tags_onehot, axis=2), 'float32')
-            return tags / (K.sum(tags) + K.epsilon())
+            sums = K.reshape(K.sum(tags, axis=1), (b, 1))
+            sums = K.repeat_elements(sums, t, 1)
+            sums = K.reshape(sums, (b, t))
+
+            return tags / sums
 
         dist = Lambda(to_distribution, name='dist')(tags)
 
         self.net = Model(inputs=inputs, outputs=[tags, dist])
-
-        def dbg_act(yt, yp):
-            '''Return the mean activation of each classifier (should be 0.5)'''
-            m = K.mean(yp, axis=2)
-            return K.mean(m)
 
         def dice_coef(yt, yp):
             '''Dice coefficient from VNet paper.'''
@@ -109,10 +153,10 @@ class VGGNet(object):
             return 1 - dice_coef(yt, yp)
 
         self.net.compile(optimizer=Adam(0.001),
-                         metrics={'tags': [dbg_act, dice_coef]},
+                         metrics={'tags': [dice_coef]},
                          loss={'tags': dice_loss,
                                'dist': 'kullback_leibler_divergence'},
-                         loss_weights={'tags': 1., 'dist': 0.4})
+                         loss_weights={'tags': 1., 'dist': 0.2})
 
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
@@ -124,10 +168,15 @@ class VGGNet(object):
         batch_gen = self.train_batch_gen('data/train.csv', 'data/train-tif', self.config['batch_size'])
 
         cb = [
+            SamplePlot(batch_gen, '%s/samples.png' % self.cpdir),
             HistoryPlot('%s/history.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/loss.weights' % self.cpdir, monitor='loss', verbose=1, save_best_only=True, mode='min'),
-            ReduceLROnPlateau(monitor='loss', factor=0.8, patience=10, verbose=1, mode='min'),
+            ModelCheckpoint('%s/loss.weights' % self.cpdir, monitor='loss', verbose=1,
+                            save_best_only=True, mode='min', save_weights_only=True),
+            ModelCheckpoint('%s/dice_coef.weights' % self.cpdir, monitor='tags_dice_coef',
+                            verbose=1, save_best_only=True, mode='max', save_weights_only=True),
+            ReduceLROnPlateau(monitor='loss', factor=0.8, patience=5, verbose=1, mode='min'),
+            EarlyStopping(monitor='loss', min_delta=0.01, patience=10, verbose=1, mode='min')
         ]
 
         self.net.fit_generator(batch_gen, steps_per_epoch=1000, verbose=1, callbacks=cb,
