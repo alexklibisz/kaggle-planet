@@ -9,6 +9,7 @@ from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, R
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
 from os import path, mkdir
+from time import time
 import argparse
 import logging
 import keras.backend as K
@@ -17,7 +18,7 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_onehot, TAGS
+from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, TAGS, onehot_F2
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
@@ -225,6 +226,17 @@ class VGGNet(object):
 
             yield imgs_batch, [tags_batch, dist_batch]
 
+    def predict(self, img_batch):
+
+        scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
+
+        for idx in range(len(img_batch)):
+            img_batch[idx] = scale(img_batch[idx])
+
+        tags_pred, dsts_pred = model.net.predict(img_batch)
+        tags_pred = tags_pred.round().astype(np.uint8)
+
+        return tags_pred, dsts_pred
 
 if __name__ == "__main__":
 
@@ -243,6 +255,7 @@ if __name__ == "__main__":
     # Prediction / submission.
     parser_predict = sub.add_parser('predict', help='make predictions')
     parser_predict.set_defaults(which='predict')
+    parser_predict.add_argument('dataset', help='dataset', choices=['train', 'test'])
     parser_predict.add_argument('-c', '--config', help='config file')
     parser_predict.add_argument('-w', '--weights', help='network weights', required=True)
 
@@ -252,14 +265,68 @@ if __name__ == "__main__":
     model = VGGNet()
     model.create_net()
 
-    def load_weights():
-        if args['weights'] is not None:
-            logger.info('Loading network weights from %s.' % args['weights'])
-            model.net.load_weights(args['weights'])
+    if args['weights'] is not None:
+        logger.info('Loading network weights from %s.' % args['weights'])
+        model.net.load_weights(args['weights'])
 
     if args['which'] == 'train':
-        load_weights()
         model.train()
 
-    elif args['which'] == 'predict':
-        logger.info('TODO')
+    elif args['which'] == 'predict' and args['dataset'] == 'train':
+        df = pd.read_csv('data/train.csv')
+        img_batch = np.empty([model.config['batch_size'], ] + model.config['input_shape'])
+        F2_scores = []
+
+        # Reading images, making predictions in batches.
+        for idx in range(0, df.shape[0], model.config['batch_size']):
+
+            # Read images, extract tags.
+            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
+            tags_true = df[idx:idx + model.config['batch_size']]['tags'].values
+            for _, img_name in enumerate(img_names):
+                try:
+                    img_batch[_] = tif.imread('data/train-tif/%s.tif' % img_name)
+                except Exception as e:
+                    logger.error('Bad image: %s' % img_name)
+                    pass
+
+            # Make predictions, compute F2 and store it.
+            tags_pred, dsts_pred = model.predict(img_batch)
+            for tt, tp in zip(tags_true, tags_pred):
+                tt = tagset_to_onehot(set(tt.split(' ')))
+                F2_scores.append(onehot_F2(tt, tp))
+
+            # Progress...
+            logger.info('%d/%d, %.2lf' % (idx, df.shape[0], np.mean(F2_scores)))
+
+    elif args['which'] == 'predict' and args['dataset'] == 'test':
+        df = pd.read_csv('data/sample_submission.csv')
+        img_batch = np.zeros([model.config['batch_size'], ] + model.config['input_shape'])
+        submission_rows = []
+
+        # Reading images, making predictions in batches.
+        for idx in range(0, df.shape[0], model.config['batch_size']):
+
+            # Read images.
+            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
+            for _, img_name in enumerate(img_names):
+                try:
+                    img_batch[_] = tif.imread('data/test-tif/%s.tif' % img_name)
+                except Exception as e:
+                    logger.error('Bad image: %s' % img_name)
+                    pass
+
+            # Make predictions, store image name and tags as list of lists.
+            tags_pred, dsts_pred = model.predict(img_batch)
+            for img_name, tp in zip(img_names, tags_pred):
+                tp = ' '.join(onehot_to_taglist(tp))
+                submission_rows.append([img_name, tp])
+
+            # Progress...
+            logger.info('%d/%d' % (idx, df.shape[0]))
+
+        # Convert list of lists to dataframe and save.
+        sub_path = '%s/submission_%s.csv' % (model.cpdir, str(int(time())))
+        df_sub = pd.DataFrame(submission_rows, columns=['image_name', 'tags'])
+        df_sub.to_csv(sub_path, index=False)
+        logger.info('Submission saved to %s.' % sub_path)

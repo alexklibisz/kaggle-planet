@@ -1,10 +1,12 @@
 from glob import glob
 from keras.utils.np_utils import to_categorical
 from os import path, listdir
+from sklearn.metrics import precision_score, recall_score, f1_score
 import tifffile as tif
 import numpy as np
 import pandas as pd
 from planet.utils.runtime import memory_usage
+
 
 # Never change the order here.
 TAGS = sorted(['agriculture', 'artisinal_mine', 'bare_ground', 'blooming', 'blow_down', 'clear', 'cloudy', 'conventional_mine',
@@ -25,6 +27,21 @@ def onehot_to_taglist(onehot):
         if onehot[idx][1] == 1:
             taglist.append(tag)
     return taglist
+
+
+def onehot_precision(A, B):
+    return precision_score(A[:, 1], B[:, 1])
+
+
+def onehot_recall(A, B):
+    return recall_score(A[:, 1], B[:, 1])
+
+
+def onehot_F2(A, B):
+    beta = 2
+    p = onehot_precision(A, B)
+    r = onehot_recall(A, B)
+    return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
 
 
 # def get_imgs_lbls(imgs_dir, lbls_path):
