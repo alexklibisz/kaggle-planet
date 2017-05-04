@@ -5,6 +5,7 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 import tifffile as tif
 import numpy as np
 import pandas as pd
+import skimage.transform as sktf
 from planet.utils.runtime import memory_usage
 
 
@@ -42,6 +43,22 @@ def onehot_F2(A, B):
     p = onehot_precision(A, B)
     r = onehot_recall(A, B)
     return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
+
+
+def random_transforms(img, nb_min=0, nb_max=5, rng=np.random):
+
+    transforms = [
+        lambda x: np.rot90(x, k=rng.randint(1, 4), axes=(0, 1)),
+        lambda x: np.flipud(x),
+        lambda x: np.fliplr(x),
+        lambda x: sktf.rotate(x, angle=rng.randint(1, 360), mode='reflect', preserve_range=True)
+    ]
+
+    nb = rng.randint(nb_min, nb_max)
+    for _ in range(nb):
+        img = rng.choice(transforms)(img)
+
+    return img
 
 
 # def get_imgs_lbls(imgs_dir, lbls_path):

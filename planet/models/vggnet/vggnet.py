@@ -18,7 +18,7 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, TAGS, onehot_F2
+from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, TAGS, onehot_F2, random_transforms
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
@@ -76,6 +76,7 @@ class VGGNet(object):
             'output_shape': [17, 2],
             'batch_size': 20,
             'nb_epochs': 200,
+            'trn_transform': True,
         }
 
         self.checkpoint_name = checkpoint_name
@@ -119,7 +120,9 @@ class VGGNet(object):
         # Each tag has its own mini dense classifier operating on the conv outputs.
         classifiers = []
         for n in range(self.config['output_shape'][0]):
-            x = Dense(22, activation='relu')(conv_flat)
+            x = Dense(32, activation='relu')(conv_flat)
+            x = Dropout(0.1)(x)
+            x = Dense(20, activation='relu')(x)
             x = Dropout(0.1)(x)
             classifiers.append(Dense(2, activation='softmax')(x))
 
@@ -145,19 +148,29 @@ class VGGNet(object):
 
         def dice_coef(yt, yp):
             '''Dice coefficient from VNet paper.'''
-            t, p = yt[:, :, 1], yp[:, :, 1]
-            nmr = 2 * K.sum(t * p)
-            dnm = K.sum(t**2) + K.sum(p**2) + K.epsilon()
+            yt, yp = yt[:, :, 1], yp[:, :, 1]
+            nmr = 2 * K.sum(yt * yp)
+            dnm = K.sum(yt**2) + K.sum(yp**2) + K.epsilon()
             return nmr / dnm
 
         def dice_loss(yt, yp):
             return 1 - dice_coef(yt, yp)
 
+        def F2(yt, yp):
+            yt, yp = K.cast(K.argmax(yt, axis=2), 'float32'), K.cast(K.argmax(yp, axis=2), 'float32')
+            tp = K.sum(yt * yp)
+            fp = K.sum(K.clip(yp - yt, 0, 1))
+            fn = K.sum(K.clip(yt - yp, 0, 1))
+            p = tp / (tp + fp)
+            r = tp / (tp + fn)
+            b = 2.0
+            return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
+
         self.net.compile(optimizer=Adam(0.001),
-                         metrics={'tags': [dice_coef]},
+                         metrics={'tags': [dice_coef, F2]},
                          loss={'tags': dice_loss,
                                'dist': 'kullback_leibler_divergence'},
-                         loss_weights={'tags': 1., 'dist': 0.2})
+                         loss_weights={'tags': 1., 'dist': 0.4})
 
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
@@ -166,7 +179,8 @@ class VGGNet(object):
 
     def train(self):
 
-        batch_gen = self.train_batch_gen('data/train.csv', 'data/train-tif', self.config['batch_size'])
+        batch_gen = self.train_batch_gen('data/train.csv', 'data/train-tif', self.config['batch_size'],
+                                         transform=self.config['trn_transform'])
 
         cb = [
             SamplePlot(batch_gen, '%s/samples.png' % self.cpdir),
@@ -185,7 +199,7 @@ class VGGNet(object):
 
         return
 
-    def train_batch_gen(self, csv_path='data/train.csv', imgs_dir='data/train-tif', batch_size=32, rng=np.random):
+    def train_batch_gen(self, csv_path='data/train.csv', imgs_dir='data/train-tif', batch_size=32, transform=False, rng=np.random):
 
         logger = logging.getLogger(funcname())
 
@@ -214,15 +228,17 @@ class VGGNet(object):
                 data_idx = rng.randint(0, len(img_names))
 
                 try:
-                    imgs_batch[batch_idx] = scale(tif.imread(img_names[data_idx]))
+                    img = tif.imread(img_names[data_idx])
+                    if transform:
+                        imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=4))
+                    else:
+                        imgs_batch[batch_idx] = scale(img)
                     tags_batch[batch_idx] = tagset_to_onehot(tag_sets[data_idx])
                     dist_batch[batch_idx] = onehot_to_distribution(tags_batch[batch_idx])
                 except Exception as e:
                     logger.error(img_names[data_idx])
                     logger.error(str(e))
                     pass
-
-            # TODO: Image augmentation.
 
             yield imgs_batch, [tags_batch, dist_batch]
 
@@ -297,7 +313,7 @@ if __name__ == "__main__":
                 F2_scores.append(onehot_F2(tt, tp))
 
             # Progress...
-            logger.info('%d/%d, %.2lf' % (idx, df.shape[0], np.mean(F2_scores)))
+            logger.info('%d/%d, %.2lf, %.2lf' % (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
 
     elif args['which'] == 'predict' and args['dataset'] == 'test':
         df = pd.read_csv('data/sample_submission.csv')
