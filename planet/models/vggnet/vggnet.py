@@ -107,9 +107,11 @@ class VGGNet(object):
         x = MaxPooling2D(2, strides=2)(x)
         x = Conv2D(128, 3, padding='same', activation='relu')(x)
         x = Conv2D(128, 3, padding='same', activation='relu')(x)
+        x = Conv2D(128, 3, padding='same', activation='relu')(x)
         x = Dropout(0.1)(x)
 
         x = MaxPooling2D(2, strides=2)(x)
+        x = Conv2D(256, 3, padding='same', activation='relu')(x)
         x = Conv2D(256, 3, padding='same', activation='relu')(x)
         x = Conv2D(256, 3, padding='same', activation='relu')(x)
         x = Dropout(0.1)(x)
@@ -190,7 +192,7 @@ class VGGNet(object):
                             save_best_only=True, mode='min', save_weights_only=True),
             ModelCheckpoint('%s/dice_coef.weights' % self.cpdir, monitor='tags_dice_coef',
                             verbose=1, save_best_only=True, mode='max', save_weights_only=True),
-            ReduceLROnPlateau(monitor='loss', factor=0.8, patience=5, verbose=1, mode='min'),
+            ReduceLROnPlateau(monitor='loss', factor=0.6, patience=3, epsilon=0.01, verbose=1, mode='min'),
             EarlyStopping(monitor='loss', min_delta=0.01, patience=10, verbose=1, mode='min')
         ]
 
