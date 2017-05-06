@@ -3,9 +3,10 @@ import numpy as np
 np.random.seed(317)
 
 from glob import glob
+from itertools import cycle
 from keras.optimizers import Adam
 from keras.models import Model
-from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda
+from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
 from keras.losses import kullback_leibler_divergence
@@ -77,7 +78,7 @@ class VGGNet(object):
             'img_shape': [140, 140, 4],
             'input_shape': [140, 140, 4],
             'output_shape': [17, 2],
-            'batch_size': 20,
+            'batch_size': 120,
             'nb_epochs': 200,
             'trn_transform': True,
         }
@@ -103,25 +104,28 @@ class VGGNet(object):
 
         x = inputs = Input(shape=self.config['input_shape'])
 
+        x = Dropout(0.05)(x)
         x = Conv2D(32, 3, padding='same', activation='relu')(x)
         x = Conv2D(32, 3, padding='same', activation='relu')(x)
+        x = BatchNormalization()(x)
         x = Dropout(0.1)(x)
 
         x = MaxPooling2D(2, strides=2)(x)
         x = Conv2D(64, 3, padding='same', activation='relu')(x)
         x = Conv2D(64, 3, padding='same', activation='relu')(x)
+        x = BatchNormalization()(x)
         x = Dropout(0.1)(x)
 
         x = MaxPooling2D(2, strides=2)(x)
         x = Conv2D(128, 3, padding='same', activation='relu')(x)
         x = Conv2D(128, 3, padding='same', activation='relu')(x)
-        x = Conv2D(128, 3, padding='same', activation='relu')(x)
+        x = BatchNormalization()(x)
         x = Dropout(0.1)(x)
 
         x = MaxPooling2D(2, strides=2)(x)
         x = Conv2D(256, 3, padding='same', activation='relu')(x)
         x = Conv2D(256, 3, padding='same', activation='relu')(x)
-        x = Conv2D(256, 3, padding='same', activation='relu')(x)
+        x = BatchNormalization()(x)
         x = Dropout(0.1)(x)
 
         x = MaxPooling2D(2, strides=2)(x)
@@ -131,8 +135,10 @@ class VGGNet(object):
         classifiers = []
         for n in range(self.config['output_shape'][0]):
             x = Dense(32, activation='relu')(conv_flat)
+            x = BatchNormalization()(x)
             x = Dropout(0.1)(x)
             x = Dense(20, activation='relu')(x)
+            x = BatchNormalization()(x)
             x = Dropout(0.1)(x)
             classifiers.append(Dense(2, activation='softmax')(x))
 
@@ -172,9 +178,7 @@ class VGGNet(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        self.net.compile(optimizer=Adam(0.001),
-                         metrics=[dice_coef, F2, kl],
-                         loss=custom_loss)
+        self.net.compile(optimizer=Adam(0.005), metrics=[dice_coef, F2, kl], loss=custom_loss)
 
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
@@ -192,11 +196,11 @@ class VGGNet(object):
                             save_best_only=True, mode='min', save_weights_only=True),
             ModelCheckpoint('%s/dice_coef.weights' % self.cpdir, monitor='dice_coef',
                             verbose=1, save_best_only=True, mode='max', save_weights_only=True),
-            ReduceLROnPlateau(monitor='loss', factor=0.6, patience=3, epsilon=0.01, verbose=1, mode='min'),
+            ReduceLROnPlateau(monitor='loss', factor=0.8, patience=2, epsilon=0.005, verbose=1, mode='min'),
             EarlyStopping(monitor='loss', min_delta=0.01, patience=10, verbose=1, mode='min')
         ]
 
-        self.net.fit_generator(batch_gen, steps_per_epoch=1000, verbose=1, callbacks=cb,
+        self.net.fit_generator(batch_gen, steps_per_epoch=100, verbose=1, callbacks=cb,
                                epochs=self.config['nb_epochs'], workers=3, pickle_safe=True, max_q_size=1000)
 
         return
@@ -214,9 +218,18 @@ class VGGNet(object):
         img_names = ['%s/%s.tif' % (imgs_dir, n) for n in df['image_name'].values]
         tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
 
+        # Error check.
         for img_name, tag_set in zip(img_names, tag_sets):
             assert path.exists(img_name), img_name
             assert len(tag_set) > 0, tag_set
+
+        # Build an index of tags to their corresponding indexes in the dataset
+        # so that you can sample tags evenly.
+        TAGS_cycle = cycle(TAGS)
+        tags_to_row_idxs = {t: [] for t in TAGS}
+        for idx, row in df.iterrows():
+            for t in row['tags'].split(' '):
+                tags_to_row_idxs[t].append(idx)
 
         while True:
 
@@ -226,18 +239,16 @@ class VGGNet(object):
 
             # Sample *self.config['batch_size']* random rows and build the batches.
             for batch_idx in range(self.config['batch_size']):
-                data_idx = self.rng.randint(0, len(img_names))
+                data_idx = self.rng.choice(tags_to_row_idxs[next(TAGS_cycle)])
 
                 try:
                     img = resize(tif.imread(img_names[data_idx]), self.config['input_shape'])
                     if self.config['trn_transform']:
-                        imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=4))
+                        imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=10))
                     else:
                         imgs_batch[batch_idx] = scale(img)
                     tags_batch[batch_idx] = tagset_to_onehot(tag_sets[data_idx])
                 except Exception as e:
-                    # logger.error(img_names[data_idx])
-                    # logger.error(str(e))
                     pass
 
             yield imgs_batch, tags_batch

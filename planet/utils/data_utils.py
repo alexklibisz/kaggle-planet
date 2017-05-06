@@ -52,8 +52,8 @@ def random_transforms(img, nb_min=0, nb_max=5, rng=np.random):
         lambda x: np.flipud(x),
         lambda x: np.fliplr(x),
         lambda x: sktf.rotate(x, angle=rng.randint(1, 360), mode='reflect', preserve_range=True),
-        # lambda x: np.roll(x, rng.randint(1, x.shape[0]), 0),
-        # lambda x: np.roll(x, rng.randint(1, x.shape[1]), 1)
+        lambda x: np.roll(x, rng.randint(1, x.shape[0]), 0),
+        lambda x: np.roll(x, rng.randint(1, x.shape[1]), 1)
     ]
 
     nb = rng.randint(nb_min, nb_max)
