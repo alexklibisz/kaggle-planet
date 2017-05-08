@@ -1,4 +1,4 @@
-# VGGNet
+# IndiConv
 import numpy as np
 np.random.seed(317)
 
@@ -70,17 +70,17 @@ class SamplePlot(Callback):
         plt.close()
 
 
-class VGGNet(object):
+class IndiConv(object):
 
-    def __init__(self, checkpoint_name='VGGNet'):
+    def __init__(self, checkpoint_name='IndiConv'):
 
         self.config = {
             'img_shape': [100, 100, 4],
             'input_shape': [100, 100, 4],
             'output_shape': [17, 2],
-            'batch_size': 50,
+            'batch_size': 75,
             'nb_epochs': 200,
-            'trn_transform': False,
+            'trn_transform': True,
         }
 
         self.checkpoint_name = checkpoint_name
@@ -98,40 +98,31 @@ class VGGNet(object):
 
     def create_net(self):
 
-        # Roughly follows the VGGNet "D" architecture, but replaces the global
-        # fully-connected layers with local fully-connected layers for each of the 17
-        # classes such that each of the classes effectively has its own softmax classifer.
+        inputs = Input(shape=self.config['input_shape'])
 
-        x = inputs = Input(shape=self.config['input_shape'])
-
-        x = Conv2D(32, 3, padding='same', activation='relu')(x)
-        x = Conv2D(32, 3, padding='same', activation='relu')(x)
-        x = Dropout(0.1)(x)
-
-        x = MaxPooling2D(2, strides=2)(x)
-        x = Conv2D(64, 3, padding='same', activation='relu')(x)
-        x = Conv2D(64, 3, padding='same', activation='relu')(x)
-        x = Dropout(0.1)(x)
-
-        x = MaxPooling2D(2, strides=2)(x)
-        x = Conv2D(128, 3, padding='same', activation='relu')(x)
-        x = Conv2D(128, 3, padding='same', activation='relu')(x)
-        x = Conv2D(128, 3, padding='same', activation='relu')(x)
-        x = Dropout(0.1)(x)
-
-        x = MaxPooling2D(2, strides=2)(x)
-        x = Conv2D(256, 3, padding='same', activation='relu')(x)
-        x = Conv2D(256, 3, padding='same', activation='relu')(x)
-        x = Conv2D(256, 3, padding='same', activation='relu')(x)
-        x = Dropout(0.1)(x)
-
-        x = MaxPooling2D(2, strides=2)(x)
-        conv_flat = Flatten()(x)
-
-        # Each tag has its own mini dense classifier operating on the conv outputs.
         classifiers = []
-        for n in range(self.config['output_shape'][0]):
-            x = Dense(32, activation='relu')(conv_flat)
+        for _ in range(self.config['output_shape'][0]):
+            x = BatchNormalization()(inputs)
+            x = Conv2D(64, 2, strides=2, activation='relu')(x)
+            x = Conv2D(64, 3, activation='relu')(x)
+            x = Conv2D(64, 3, activation='relu')(x)
+            x = Dropout(0.1)(x)
+
+            x = BatchNormalization()(x)
+            x = Conv2D(96, 2, strides=2, activation='relu')(x)
+            x = Conv2D(96, 3, activation='relu')(x)
+            x = Conv2D(96, 3, activation='relu')(x)
+            x = Dropout(0.1)(x)
+
+            x = BatchNormalization()(x)
+            x = Conv2D(128, 2, strides=2, activation='relu')(x)
+            x = Conv2D(128, 3, activation='relu')(x)
+            x = Conv2D(128, 3, activation='relu')(x)
+            x = Dropout(0.1)(x)
+
+            x = BatchNormalization()(x)
+            x = Flatten()(x)
+            x = Dense(32, activation='relu')(x)
             x = Dropout(0.1)(x)
             x = Dense(20, activation='relu')(x)
             x = Dropout(0.1)(x)
@@ -150,18 +141,26 @@ class VGGNet(object):
             dnm = K.sum(yt**2) + K.sum(yp**2) + K.epsilon()
             return nmr / dnm
 
-        def kl(yt, yp):
-            '''KL Divergence of the positive activation distributions.
-            Compares the normalized distribution of positive activations.'''
-            yt, yp = K.round(yt[:, :, 1:]), K.round(yp[:, :, 1:])
-            sums_yt = K.repeat(K.sum(yt, axis=1), 17)
-            sums_yp = K.repeat(K.sum(yt, axis=1), 17)
-            yt = yt / sums_yt
-            yp = yp / sums_yp
-            return kullback_leibler_divergence(yt, yp)
+        # def kl(yt, yp):
+        #     '''KL Divergence of the positive activation distributions.
+        #     Compares the normalized distribution of positive activations.'''
+        #     yt, yp = K.round(yt[:, :, 1:]), K.round(yp[:, :, 1:])
+        #     sums_yt = K.repeat(K.sum(yt, axis=1), 17)
+        #     sums_yp = K.repeat(K.sum(yt, axis=1), 17)
+        #     yt = yt / sums_yt
+        #     yp = yp / sums_yp
+        #     return kullback_leibler_divergence(yt, yp)
+
+        # def klsums(yt, yp):
+        #     yt, yp = K.round(yt[:, :, 1:]), K.round(yp[:, :, 1:])
+        #     sums_yt = K.repeat(K.sum(yt, axis=1), 17)
+        #     sums_yp = K.repeat(K.sum(yt, axis=1), 17)
+        #     yt = yt / sums_yt
+        #     yp = yp / sums_yp
+        #     return K.sum(yt) + K.sum(yp)
 
         def custom_loss(yt, yp):
-            return (1 - dice_coef(yt, yp)) + (0. * kl(yt, yp))
+            return (1 - dice_coef(yt, yp))
 
         def F2(yt, yp):
             yt, yp = K.cast(K.argmax(yt, axis=2), 'float32'), K.cast(K.argmax(yp, axis=2), 'float32')
@@ -173,10 +172,90 @@ class VGGNet(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        self.net.compile(optimizer=Adam(0.0005), metrics=[dice_coef, F2, kl], loss=custom_loss)
+        self.net.compile(optimizer=Adam(0.001), metrics=[dice_coef, F2], loss=custom_loss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
         return
+
+    # def create_net2(self):
+
+    #     x = inputs = Input(shape=self.config['input_shape'])
+
+    #     x = Conv2D(50, 3, activation='relu')(x)
+    #     x = Conv2D(50, 3, activation='relu')(x)
+    #     x = Dropout(0.1)(x)
+    #     top = x = MaxPooling2D(2, strides=2)(x)
+
+    #     extractors = []
+    #     for _ in range(self.config['output_shape'][0]):
+
+    #         x = Conv2D(50, 3, activation='relu')(top)
+    #         x = Conv2D(50, 3, activation='relu')(x)
+    #         x = Dropout(0.1)(x)
+    #         x = MaxPooling2D(2, strides=2)(x)
+
+    #         x = Conv2D(50, 3, activation='relu')(x)
+    #         x = Conv2D(50, 3, activation='relu')(x)
+    #         x = Dropout(0.1)(x)
+    #         x = MaxPooling2D(2, strides=2)(x)
+    #         extractors.append(x)
+
+    #     combined = concatenate(extractors, axis=-1)
+
+    #     classifiers = []
+    #     for extractor in extractors:
+
+    #         x = Conv2D(50, 3, activation='relu')(combined)
+    #         x = Conv2D(50, 3, activation='relu')(x)
+    #         x = Conv2D(50, 3, activation='relu')(x)
+    #         x = Dropout(0.1)(x)
+    #         x = MaxPooling2D(2, strides=2)(x)
+
+    #         x = Flatten()(x)
+    #         x = Dense(20, activation='relu')(x)
+    #         x = Dropout(0.1)(x)
+    #         classifiers.append(Dense(2, activation='softmax')(x))
+
+    #     # Concatenate and reshape the classifier outputs.
+    #     combined = concatenate(classifiers, axis=-1)
+    #     tags = x = Reshape(self.config['output_shape'], name='tags')(combined)
+
+    #     self.net = Model(inputs=inputs, outputs=tags)
+
+    #     def dice_coef(yt, yp):
+    #         '''Dice coefficient from VNet paper.'''
+    #         yt, yp = yt[:, :, 1], yp[:, :, 1]
+    #         nmr = 2 * K.sum(yt * yp)
+    #         dnm = K.sum(yt**2) + K.sum(yp**2) + K.epsilon()
+    #         return nmr / dnm
+
+    #     def kl(yt, yp):
+    #         '''KL Divergence of the positive activation distributions.
+    #         Compares the normalized distribution of positive activations.'''
+    #         yt, yp = K.round(yt[:, :, 1:]), K.round(yp[:, :, 1:])
+    #         sums_yt = K.repeat(K.sum(yt, axis=1), 17)
+    #         sums_yp = K.repeat(K.sum(yt, axis=1), 17)
+    #         yt = yt / sums_yt
+    #         yp = yp / sums_yp
+    #         return kullback_leibler_divergence(yt, yp)
+
+    #     def custom_loss(yt, yp):
+    #         return (1 - dice_coef(yt, yp))
+
+    #     def F2(yt, yp):
+    #         yt, yp = K.cast(K.argmax(yt, axis=2), 'float32'), K.cast(K.argmax(yp, axis=2), 'float32')
+    #         tp = K.sum(yt * yp)
+    #         fp = K.sum(K.clip(yp - yt, 0, 1))
+    #         fn = K.sum(K.clip(yt - yp, 0, 1))
+    #         p = tp / (tp + fp)
+    #         r = tp / (tp + fn)
+    #         b = 2.0
+    #         return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
+
+    #     self.net.compile(optimizer=Adam(0.0005), metrics=[dice_coef, F2, kl], loss=custom_loss)
+    #     self.net.summary()
+    #     plot_model(self.net, to_file='%s/net.png' % self.cpdir)
+    #     return
 
     def train(self):
 
@@ -191,7 +270,7 @@ class VGGNet(object):
             ModelCheckpoint('%s/dice_coef.weights' % self.cpdir, monitor='dice_coef',
                             verbose=1, save_best_only=True, mode='max', save_weights_only=True),
             ReduceLROnPlateau(monitor='loss', factor=0.8, patience=2, epsilon=0.005, verbose=1, mode='min'),
-            EarlyStopping(monitor='loss', min_delta=0.01, patience=10, verbose=1, mode='min')
+            EarlyStopping(monitor='loss', min_delta=0.01, patience=15, verbose=1, mode='min')
         ]
 
         self.net.fit_generator(batch_gen, steps_per_epoch=500, verbose=1, callbacks=cb,
@@ -263,9 +342,9 @@ class VGGNet(object):
 if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger('VGGNet')
+    logger = logging.getLogger('IndiConv')
 
-    parser = argparse.ArgumentParser(description='VGGNet Model.')
+    parser = argparse.ArgumentParser(description='IndiConv Model.')
     sub = parser.add_subparsers(title='actions', description='Choose an action.')
 
     # Training.
@@ -284,7 +363,7 @@ if __name__ == "__main__":
     args = vars(parser.parse_args())
     assert args['which'] in ['train', 'predict']
 
-    model = VGGNet()
+    model = IndiConv()
     model.create_net()
 
     if args['weights'] is not None:
