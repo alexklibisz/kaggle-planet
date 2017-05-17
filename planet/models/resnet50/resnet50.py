@@ -133,8 +133,8 @@ class ResNet50(object):
             EarlyStopping(monitor='loss', min_delta=0.01, patience=15, verbose=1, mode='min')
         ]
 
-        self.net.fit_generator(batch_gen, steps_per_epoch=10, verbose=1, callbacks=cb,
-                               epochs=self.config['nb_epochs'], workers=3, pickle_safe=True, max_q_size=10)
+        self.net.fit_generator(batch_gen, steps_per_epoch=100, verbose=1, callbacks=cb,
+                               epochs=self.config['nb_epochs'], workers=3, pickle_safe=True, max_q_size=100)
 
         return
 

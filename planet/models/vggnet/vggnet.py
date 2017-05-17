@@ -237,7 +237,7 @@ class VGGNet(object):
                 data_idx = self.rng.randint(0, len(img_names))
 
                 try:
-                    img = resize(tif.imread(img_names[data_idx]), self.config['input_shape'][:2], preserve_range=True)
+                    img = resize(tif.imread(img_names[data_idx]), self.config['input_shape'][:2], preserve_range=True, mode='constant')
                     if self.config['trn_transform']:
                         imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=5))
                     else:
@@ -308,7 +308,7 @@ if __name__ == "__main__":
             for _, img_name in enumerate(img_names):
                 try:
                     img_batch[_] = resize(tif.imread('data/train-tif/%s.tif' % img_name),
-                                          model.config['input_shape'][:2], preserve_range=True)
+                                          model.config['input_shape'][:2], preserve_range=True, mode='constant')
                 except Exception as e:
                     logger.error('Bad image: %s' % img_name)
                     pass
@@ -335,7 +335,7 @@ if __name__ == "__main__":
             for _, img_name in enumerate(img_names):
                 try:
                     img_batch[_] = resize(tif.imread('data/test-tif/%s.tif' % img_name),
-                                          model.config['input_shape'][:2], preserve_range=True)
+                                          model.config['input_shape'][:2], preserve_range=True, mode='constant')
                 except Exception as e:
                     logger.error('Bad image: %s' % img_name)
                     pass
