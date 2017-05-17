@@ -19,6 +19,12 @@ def tagset_to_onehot(tagset):
         tags[idx][int(tag in tagset)] = 1
     return tags
 
+def tagset_to_boolarray(tagset):
+    tags = np.zeros((len(TAGS), 1), dtype=np.uint8)
+    for idx, tag in enumerate(TAGS):
+        if tag in tagset:
+            tags[idx] = 1
+    return tags
 
 def onehot_to_taglist(onehot):
     taglist = []
