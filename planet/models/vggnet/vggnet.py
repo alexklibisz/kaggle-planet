@@ -80,7 +80,7 @@ class VGGNet(object):
             'output_shape': [17, 2],
             'batch_size': 50,
             'nb_epochs': 200,
-            'trn_transform': False,
+            'trn_transform': True,
         }
 
         self.checkpoint_name = checkpoint_name
@@ -131,9 +131,10 @@ class VGGNet(object):
         # Each tag has its own mini dense classifier operating on the conv outputs.
         classifiers = []
         for n in range(self.config['output_shape'][0]):
-            x = Dense(32, activation='relu')(conv_flat)
+            x = conv_flat
+            x = Dense(44, activation='relu')(x)
             x = Dropout(0.1)(x)
-            x = Dense(20, activation='relu')(x)
+            x = Dense(22, activation='relu')(x)
             x = Dropout(0.1)(x)
             classifiers.append(Dense(2, activation='softmax')(x))
 
@@ -180,7 +181,7 @@ class VGGNet(object):
 
     def train(self):
 
-        batch_gen = self.train_batch_gen('data/train.csv', 'data/train-tif')
+        batch_gen = self.train_batch_gen('data/train_v2.csv', 'data/train-tif-v2')
 
         cb = [
             SamplePlot(batch_gen, '%s/samples.png' % self.cpdir),
@@ -195,11 +196,11 @@ class VGGNet(object):
         ]
 
         self.net.fit_generator(batch_gen, steps_per_epoch=500, verbose=1, callbacks=cb,
-                               epochs=self.config['nb_epochs'], workers=3, pickle_safe=True, max_q_size=1000)
+                               epochs=self.config['nb_epochs'], workers=4, pickle_safe=True, max_q_size=1000)
 
         return
 
-    def train_batch_gen(self, csv_path='data/train.csv', imgs_dir='data/train-tif'):
+    def train_batch_gen(self, csv_path='data/train_v2.csv', imgs_dir='data/train-tif-v2'):
 
         logger = logging.getLogger(funcname())
 
@@ -295,7 +296,7 @@ if __name__ == "__main__":
         model.train()
 
     elif args['which'] == 'predict' and args['dataset'] == 'train':
-        df = pd.read_csv('data/train.csv')
+        df = pd.read_csv('data/train_v2.csv')
         img_batch = np.empty([model.config['batch_size'], ] + model.config['input_shape'])
         F2_scores = []
 
@@ -307,7 +308,7 @@ if __name__ == "__main__":
             tags_true = df[idx:idx + model.config['batch_size']]['tags'].values
             for _, img_name in enumerate(img_names):
                 try:
-                    img_batch[_] = resize(tif.imread('data/train-tif/%s.tif' % img_name),
+                    img_batch[_] = resize(tif.imread('data/train-tif-v2/%s.tif' % img_name),
                                           model.config['input_shape'][:2], preserve_range=True, mode='constant')
                 except Exception as e:
                     logger.error('Bad image: %s' % img_name)
@@ -323,7 +324,7 @@ if __name__ == "__main__":
             logger.info('%d/%d, %.2lf, %.2lf' % (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
 
     elif args['which'] == 'predict' and args['dataset'] == 'test':
-        df = pd.read_csv('data/sample_submission.csv')
+        df = pd.read_csv('data/sample_submission_v2.csv')
         img_batch = np.zeros([model.config['batch_size'], ] + model.config['input_shape'])
         submission_rows = []
 
@@ -334,7 +335,7 @@ if __name__ == "__main__":
             img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
             for _, img_name in enumerate(img_names):
                 try:
-                    img_batch[_] = resize(tif.imread('data/test-tif/%s.tif' % img_name),
+                    img_batch[_] = resize(tif.imread('data/test-tif-v2/%s.tif' % img_name),
                                           model.config['input_shape'][:2], preserve_range=True, mode='constant')
                 except Exception as e:
                     logger.error('Bad image: %s' % img_name)
