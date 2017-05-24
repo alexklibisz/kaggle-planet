@@ -10,7 +10,7 @@ from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
-from keras.losses import kullback_leibler_divergence
+from keras.losses import kullback_leibler_divergence as KLD
 from keras.applications import resnet50
 from os import path, mkdir
 from skimage.transform import resize
@@ -138,8 +138,14 @@ class ResNet50(object):
 
         def dice_loss(yt, yp):
             return 1 - dice_coef(yt, yp)
+        
+        def kl_loss(yt, yp):
+            return KLD(K.flatten(yt) / K.sum(yt), K.flatten(yp) / K.sum(yp))
+ 
+        def custom_loss(yt, yp):
+            return dice_loss(yt, yp) + kl_loss(yt, yp)
 
-        self.net.compile(optimizer=Adam(0.001), metrics=[F2], loss=dice_loss)
+        self.net.compile(optimizer=Adam(0.001), metrics=[F2, dice_loss, kl_loss], loss=custom_loss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
