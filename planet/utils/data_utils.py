@@ -49,10 +49,9 @@ def onehot_F2(A, B):
     return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
 
 
-def random_transforms(img, nb_min=0, nb_max=5, rng=np.random):
+def random_transforms(img, nb_min=0, nb_max=2, rng=np.random):
 
     transforms = [
-        lambda x: x,
         lambda x: x,
         lambda x: np.rot90(x, k=rng.randint(1, 4), axes=(0, 1)),
         lambda x: np.flipud(x),
@@ -60,9 +59,11 @@ def random_transforms(img, nb_min=0, nb_max=5, rng=np.random):
         lambda x: np.roll(x, rng.randint(1, x.shape[0]), 0),
         lambda x: np.roll(x, rng.randint(1, x.shape[1]), 1),
         lambda x: sktf.rotate(x, angle=rng.randint(1, 360), preserve_range=True, mode='reflect'),
-        lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, x.shape[0] / 4), x.shape[0] + rng.randint(0, x.shape[1] / 4)),
+
+        # Resize up to 4px in horizontal or vertical direction. Crop starting at top left or bottom right.
+	lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[0] + rng.randint(0, 4)),
                               preserve_range=True, mode='constant')[:x.shape[0], :x.shape[1], :],
-        lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, x.shape[0] / 4), x.shape[0] + rng.randint(0, x.shape[1] / 4)),
+        lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[0] + rng.randint(0, 4)),
                               preserve_range=True, mode='constant')[-x.shape[0]:, -x.shape[1]:, :],
     ]
 
