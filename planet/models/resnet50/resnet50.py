@@ -11,6 +11,7 @@ from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, R
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
 from keras.losses import kullback_leibler_divergence as KLD
+from keras.losses import binary_crossentropy
 from keras.applications import resnet50
 from os import path, mkdir
 from skimage.transform import resize
@@ -26,7 +27,6 @@ sys.path.append('.')
 from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, TAGS, onehot_F2, random_transforms
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
-from planet.utils import model_utils
 
 
 class SamplePlot(Callback):  # copied unmodified from indiconv.py and vggnet.py - 5/16/2017
@@ -107,11 +107,13 @@ class ResNet50(object):
         res = resnet50.ResNet50(include_top=False, weights=None, input_tensor=inputs)
 
         # Add a classifier for each class instead of a single classifier.
-        conv_flat = Flatten()(res.output)
+        res_out = Flatten()(res.output)
+        res_out = Dropout(0.1)(res_out)
+        # res_out = Dense(512, activation='relu')(x)
+
         classifiers = []
         for n in range(self.config['output_shape'][0]):
-            x = Dropout(0.1)(conv_flat)
-            classifiers.append(Dense(2, activation='softmax')(x))
+            classifiers.append(Dense(2, activation='softmax')(res_out))
 
         # Concatenate classifiers and reshape to match output shape.
         x = concatenate(classifiers, axis=-1)
@@ -138,14 +140,14 @@ class ResNet50(object):
 
         def dice_loss(yt, yp):
             return 1 - dice_coef(yt, yp)
-        
+
         def kl_loss(yt, yp):
             return KLD(K.flatten(yt) / K.sum(yt), K.flatten(yp) / K.sum(yp))
- 
-        def custom_loss(yt, yp):
-            return dice_loss(yt, yp) + kl_loss(yt, yp)
 
-        self.net.compile(optimizer=Adam(0.001), metrics=[F2, dice_loss, kl_loss], loss=custom_loss)
+        def custom_loss(yt, yp):
+            return binary_crossentropy(yt, yp)
+
+        self.net.compile(optimizer=Adam(0.001), metrics=[F2, dice_coef, kl_loss], loss=custom_loss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
@@ -164,7 +166,7 @@ class ResNet50(object):
         ]
 
         self.net.fit_generator(batch_gen, steps_per_epoch=500, verbose=1, callbacks=cb,
-                               epochs=self.config['nb_epochs'], workers=3, pickle_safe=True, max_q_size=100)
+                               epochs=self.config['nb_epochs'], workers=1, pickle_safe=True, max_q_size=100)
 
         return
 

@@ -19,12 +19,14 @@ def tagset_to_onehot(tagset):
         tags[idx][int(tag in tagset)] = 1
     return tags
 
+
 def tagset_to_boolarray(tagset):
     tags = np.zeros((len(TAGS), 1), dtype=np.uint8)
     for idx, tag in enumerate(TAGS):
         if tag in tagset:
             tags[idx] = 1
     return tags
+
 
 def onehot_to_taglist(onehot):
     taglist = []
@@ -61,9 +63,9 @@ def random_transforms(img, nb_min=0, nb_max=2, rng=np.random):
         lambda x: sktf.rotate(x, angle=rng.randint(1, 360), preserve_range=True, mode='reflect'),
 
         # Resize up to 4px in horizontal or vertical direction. Crop starting at top left or bottom right.
-	lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[0] + rng.randint(0, 4)),
+        lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[1] + rng.randint(0, 4)),
                               preserve_range=True, mode='constant')[:x.shape[0], :x.shape[1], :],
-        lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[0] + rng.randint(0, 4)),
+        lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[1] + rng.randint(0, 4)),
                               preserve_range=True, mode='constant')[-x.shape[0]:, -x.shape[1]:, :],
     ]
 
