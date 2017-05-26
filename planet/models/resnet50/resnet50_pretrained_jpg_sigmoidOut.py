@@ -24,7 +24,7 @@ from scipy.misc import imread
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, tagset_to_boolarray, TAGS, onehot_F2, random_transforms
+from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, tagset_to_boolarray, boolarray_to_taglist, TAGS, onehot_F2, bool_F2, random_transforms
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 from planet.utils import model_utils
@@ -269,8 +269,8 @@ if __name__ == "__main__":  # copied unmodified from vggnet.py and indiconv.py (
             # Make predictions, compute F2 and store it.
             tags_pred = model.predict(img_batch)
             for tt, tp in zip(tags_true, tags_pred):
-                tt = tagset_to_onehot(set(tt.split(' ')))
-                F2_scores.append(onehot_F2(tt, tp))
+                tt = tagset_to_boolarray(set(tt.split(' ')))
+                F2_scores.append(bool_F2(tt, tp))
 
             # Progress...
             logger.info('%d/%d, %.2lf, %.2lf' % (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
@@ -296,7 +296,7 @@ if __name__ == "__main__":  # copied unmodified from vggnet.py and indiconv.py (
             # Make predictions, store image name and tags as list of lists.
             tags_pred = model.predict(img_batch)
             for img_name, tp in zip(img_names, tags_pred):
-                tp = ' '.join(onehot_to_taglist(tp))
+                tp = ' '.join(boolarray_to_taglist(tp))
                 submission_rows.append([img_name, tp])
 
             # Progress...

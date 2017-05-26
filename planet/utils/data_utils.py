@@ -27,6 +27,12 @@ def tagset_to_boolarray(tagset):
             tags[idx] = 1
     return tags
 
+def boolarray_to_taglist(boolarray):
+    taglist = []
+    for idx, tag in enumerate(TAGS):
+        if boolarray[idx] == 1:
+            taglist.append(tag)
+    return taglist
 
 def onehot_to_taglist(onehot):
     taglist = []
@@ -48,6 +54,12 @@ def onehot_F2(A, B):
     beta = 2
     p = onehot_precision(A, B)
     r = onehot_recall(A, B)
+    return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
+
+def bool_F2(A, B):
+    beta = 2
+    p = precision_score(A, B)
+    r = recall_score(A, B)
     return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
 
 
