@@ -269,7 +269,7 @@ if __name__ == "__main__":  # copied unmodified from vggnet.py and indiconv.py (
             tags_true = df[idx:idx + model.config['batch_size']]['tags'].values
             for _, img_name in enumerate(img_names):
                 try:
-                    img_batch[_] = resize(imread('data/train-jpg-v2/%s.jpg' % img_name),
+                    img_batch[_] = resize(imread('data/train-jpg-v2/%s.jpg' % img_name, mode='RGB'),
                                           model.config['input_shape'][:2], preserve_range=True, mode='constant')
                 except Exception as e:
                     logger.error('Bad image: %s' % img_name)
@@ -296,7 +296,7 @@ if __name__ == "__main__":  # copied unmodified from vggnet.py and indiconv.py (
             img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
             for _, img_name in enumerate(img_names):
                 try:
-                    img_batch[_] = resize(imread('data/test-jpg-v2/%s.jpg' % img_name),
+                    img_batch[_] = resize(imread('data/test-jpg-v2/%s.jpg' % img_name, mode='RGB'),
                                           model.config['input_shape'][:2], preserve_range=True, mode='constant')
                 except Exception as e:
                     logger.error('Bad image: %s' % img_name)
