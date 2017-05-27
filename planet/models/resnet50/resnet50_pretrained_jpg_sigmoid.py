@@ -48,7 +48,7 @@ class SamplePlot(Callback):  # copied unmodified from indiconv.py and vggnet.py 
         import matplotlib.pyplot as plt
 
         imgs_batch, tags_batch = next(self.batch_gen)
-        tags_pred = model.net.predict(imgs_batch)
+        tags_pred = self.model.predict(imgs_batch)
 
         nrows, ncols = min(len(imgs_batch), 10), 2
         fig, _ = plt.subplots(nrows, ncols, figsize=(8, nrows * 2.5))
@@ -74,7 +74,7 @@ class SamplePlot(Callback):  # copied unmodified from indiconv.py and vggnet.py 
         plt.close()
 
 
-class ResNet50(object):
+class ResNet50_sigmoid(object):
 
     def __init__(self, checkpoint_name='ResNet50_sigmoid'):
         self.config = {
@@ -83,6 +83,7 @@ class ResNet50(object):
             'batch_size': 65,  # Big boy GPU.
             'nb_epochs': 200,
             'trn_transform': True,
+            'imgs_dir': 'data/train-jpg-v2',
         }
 
         self.checkpoint_name = checkpoint_name
@@ -146,7 +147,7 @@ class ResNet50(object):
 
     def train(self):
 
-        batch_gen = self.train_batch_gen('data/train_v2.csv', 'data/train-jpg-v2')
+        batch_gen = self.train_batch_gen('data/train_v2.csv', self.config['imgs_dir'])
 
         cb = [
             SamplePlot(batch_gen, '%s/samples.png' % self.cpdir),
@@ -202,108 +203,16 @@ class ResNet50(object):
             yield imgs_batch, tags_batch
 
     def predict(self, img_batch):
-
         scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
 
         for idx in range(len(img_batch)):
             img_batch[idx] = scale(img_batch[idx])
 
-        tags_pred = model.net.predict(img_batch)
+        tags_pred = self.net.predict(img_batch)
         tags_pred = tags_pred.round().astype(np.uint8)
 
         return tags_pred
 
-if __name__ == "__main__":  # copied unmodified from vggnet.py and indiconv.py (except for the word ResNet50)
-
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger('ResNet50')
-
-    parser = argparse.ArgumentParser(description='ResNet50 Model.')
-    sub = parser.add_subparsers(title='actions', description='Choose an action.')
-
-    # Training.
-    parser_train = sub.add_parser('train', help='training')
-    parser_train.set_defaults(which='train')
-    parser_train.add_argument('-c', '--config', help='config file')
-    parser_train.add_argument('-w', '--weights', help='network weights')
-
-    # Prediction / submission.
-    parser_predict = sub.add_parser('predict', help='make predictions')
-    parser_predict.set_defaults(which='predict')
-    parser_predict.add_argument('dataset', help='dataset', choices=['train', 'test'])
-    parser_predict.add_argument('-c', '--config', help='config file')
-    parser_predict.add_argument('-w', '--weights', help='network weights', required=True)
-
-    args = vars(parser.parse_args())
-    assert args['which'] in ['train', 'predict']
-
-    model = ResNet50()
-    model.create_net()
-
-    if args['weights'] is not None:
-        logger.info('Loading network weights from %s.' % args['weights'])
-        model.net.load_weights(args['weights'])
-
-    if args['which'] == 'train':
-        model.train()
-
-    elif args['which'] == 'predict' and args['dataset'] == 'train':
-        df = pd.read_csv('data/train_v2.csv')
-        img_batch = np.empty([model.config['batch_size'], ] + model.config['input_shape'])
-        F2_scores = []
-
-        # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size']):
-
-            # Read images, extract tags.
-            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
-            tags_true = df[idx:idx + model.config['batch_size']]['tags'].values
-            for _, img_name in enumerate(img_names):
-                try:
-                    img_batch[_] = resize(imread('data/train-jpg-v2/%s.jpg' % img_name, mode='RGB'),
-                                          model.config['input_shape'][:2], preserve_range=True, mode='constant')
-                except Exception as e:
-                    logger.error('Bad image: %s' % img_name)
-                    pass
-
-            # Make predictions, compute F2 and store it.
-            tags_pred = model.predict(img_batch)
-            for tt, tp in zip(tags_true, tags_pred):
-                tt = tagset_to_boolarray(set(tt.split(' ')))
-                F2_scores.append(bool_F2(tt, tp))
-
-            # Progress...
-            logger.info('%d/%d, %.2lf, %.2lf' % (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
-
-    elif args['which'] == 'predict' and args['dataset'] == 'test':
-        df = pd.read_csv('data/sample_submission_v2.csv')
-        img_batch = np.zeros([model.config['batch_size'], ] + model.config['input_shape'])
-        submission_rows = []
-
-        # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size']):
-
-            # Read images.
-            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
-            for _, img_name in enumerate(img_names):
-                try:
-                    img_batch[_] = resize(imread('data/test-jpg-v2/%s.jpg' % img_name, mode='RGB'),
-                                          model.config['input_shape'][:2], preserve_range=True, mode='constant')
-                except Exception as e:
-                    logger.error('Bad image: %s' % img_name)
-                    pass
-
-            # Make predictions, store image name and tags as list of lists.
-            tags_pred = model.predict(img_batch)
-            for img_name, tp in zip(img_names, tags_pred):
-                tp = ' '.join(boolarray_to_taglist(tp))
-                submission_rows.append([img_name, tp])
-
-            # Progress...
-            logger.info('%d/%d' % (idx, df.shape[0]))
-
-        # Convert list of lists to dataframe and save.
-        sub_path = '%s/submission_%s.csv' % (model.cpdir, str(int(time())))
-        df_sub = pd.DataFrame(submission_rows, columns=['image_name', 'tags'])
-        df_sub.to_csv(sub_path, index=False)
-        logger.info('Submission saved to %s.' % sub_path)
+if __name__ == "__main__":
+    from planet.model_runner import model_runner
+    model_runner(ResNet50_sigmoid)

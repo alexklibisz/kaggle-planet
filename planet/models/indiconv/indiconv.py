@@ -44,7 +44,7 @@ class SamplePlot(Callback):
         import matplotlib.pyplot as plt
 
         imgs_batch, tags_batch = next(self.batch_gen)
-        tags_pred = model.net.predict(imgs_batch)
+        tags_pred = self.model.predict(imgs_batch)
 
         nrows, ncols = min(len(imgs_batch), 10), 2
         fig, _ = plt.subplots(nrows, ncols, figsize=(8, nrows * 2.5))
@@ -81,6 +81,7 @@ class IndiConv(object):
             'batch_size': 75,
             'nb_epochs': 200,
             'trn_transform': True,
+            'imgs_dir': 'data/train-tif-v2',
         }
 
         self.checkpoint_name = checkpoint_name
@@ -259,7 +260,7 @@ class IndiConv(object):
 
     def train(self):
 
-        batch_gen = self.train_batch_gen('data/train.csv', 'data/train-tif')
+        batch_gen = self.train_batch_gen('data/train_v2.csv', self.config['imgs_dir'])
 
         cb = [
             SamplePlot(batch_gen, '%s/samples.png' % self.cpdir),
@@ -278,7 +279,7 @@ class IndiConv(object):
 
         return
 
-    def train_batch_gen(self, csv_path='data/train.csv', imgs_dir='data/train-tif'):
+    def train_batch_gen(self, csv_path='data/train_v2.csv', imgs_dir='data/train-tif-v2'):
 
         logger = logging.getLogger(funcname())
 
@@ -315,15 +316,12 @@ class IndiConv(object):
                 # data_idx = self.rng.choice(tags_to_row_idxs[next(TAGS_cycle)])
                 data_idx = self.rng.randint(0, len(img_names))
 
-                try:
-                    img = resize(tif.imread(img_names[data_idx]), self.config['input_shape'][:2], preserve_range=True, mode='constant')
-                    if self.config['trn_transform']:
-                        imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=5))
-                    else:
-                        imgs_batch[batch_idx] = scale(img)
-                    tags_batch[batch_idx] = tagset_to_onehot(tag_sets[data_idx])
-                except Exception as e:
-                    pass
+                img = resize(tif.imread(img_names[data_idx]), self.config['input_shape'][:2], preserve_range=True, mode='constant')
+                if self.config['trn_transform']:
+                    imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=5))
+                else:
+                    imgs_batch[batch_idx] = scale(img)
+                tags_batch[batch_idx] = tagset_to_onehot(tag_sets[data_idx])
 
             yield imgs_batch, tags_batch
 
@@ -334,102 +332,13 @@ class IndiConv(object):
         for idx in range(len(img_batch)):
             img_batch[idx] = scale(img_batch[idx])
 
-        tags_pred = model.net.predict(img_batch)
+        tags_pred = self.net.predict(img_batch)
         tags_pred = tags_pred.round().astype(np.uint8)
 
+        # Convert from onehot to an array of bools
+        tags_pred = tags_pred[:, :, 1]
         return tags_pred
 
 if __name__ == "__main__":
-
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger('IndiConv')
-
-    parser = argparse.ArgumentParser(description='IndiConv Model.')
-    sub = parser.add_subparsers(title='actions', description='Choose an action.')
-
-    # Training.
-    parser_train = sub.add_parser('train', help='training')
-    parser_train.set_defaults(which='train')
-    parser_train.add_argument('-c', '--config', help='config file')
-    parser_train.add_argument('-w', '--weights', help='network weights')
-
-    # Prediction / submission.
-    parser_predict = sub.add_parser('predict', help='make predictions')
-    parser_predict.set_defaults(which='predict')
-    parser_predict.add_argument('dataset', help='dataset', choices=['train', 'test'])
-    parser_predict.add_argument('-c', '--config', help='config file')
-    parser_predict.add_argument('-w', '--weights', help='network weights', required=True)
-
-    args = vars(parser.parse_args())
-    assert args['which'] in ['train', 'predict']
-
-    model = IndiConv()
-    model.create_net()
-
-    if args['weights'] is not None:
-        logger.info('Loading network weights from %s.' % args['weights'])
-        model.net.load_weights(args['weights'])
-
-    if args['which'] == 'train':
-        model.train()
-
-    elif args['which'] == 'predict' and args['dataset'] == 'train':
-        df = pd.read_csv('data/train.csv')
-        img_batch = np.empty([model.config['batch_size'], ] + model.config['input_shape'])
-        F2_scores = []
-
-        # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size']):
-
-            # Read images, extract tags.
-            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
-            tags_true = df[idx:idx + model.config['batch_size']]['tags'].values
-            for _, img_name in enumerate(img_names):
-                try:
-                    img_batch[_] = resize(tif.imread('data/train-tif/%s.tif' % img_name),
-                                          model.config['input_shape'][:2], preserve_range=True, mode='constant')
-                except Exception as e:
-                    logger.error('Bad image: %s' % img_name)
-                    pass
-
-            # Make predictions, compute F2 and store it.
-            tags_pred = model.predict(img_batch)
-            for tt, tp in zip(tags_true, tags_pred):
-                tt = tagset_to_onehot(set(tt.split(' ')))
-                F2_scores.append(onehot_F2(tt, tp))
-
-            # Progress...
-            logger.info('%d/%d, %.2lf, %.2lf' % (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
-
-    elif args['which'] == 'predict' and args['dataset'] == 'test':
-        df = pd.read_csv('data/sample_submission.csv')
-        img_batch = np.zeros([model.config['batch_size'], ] + model.config['input_shape'])
-        submission_rows = []
-
-        # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size']):
-
-            # Read images.
-            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
-            for _, img_name in enumerate(img_names):
-                try:
-                    img_batch[_] = resize(tif.imread('data/test-tif/%s.tif' % img_name),
-                                          model.config['input_shape'][:2], preserve_range=True, mode='constant')
-                except Exception as e:
-                    logger.error('Bad image: %s' % img_name)
-                    pass
-
-            # Make predictions, store image name and tags as list of lists.
-            tags_pred = model.predict(img_batch)
-            for img_name, tp in zip(img_names, tags_pred):
-                tp = ' '.join(onehot_to_taglist(tp))
-                submission_rows.append([img_name, tp])
-
-            # Progress...
-            logger.info('%d/%d' % (idx, df.shape[0]))
-
-        # Convert list of lists to dataframe and save.
-        sub_path = '%s/submission_%s.csv' % (model.cpdir, str(int(time())))
-        df_sub = pd.DataFrame(submission_rows, columns=['image_name', 'tags'])
-        df_sub.to_csv(sub_path, index=False)
-        logger.info('Submission saved to %s.' % sub_path)
+    from planet.model_runner import model_runner
+    model_runner(IndiConv)

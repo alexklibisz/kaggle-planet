@@ -11,7 +11,6 @@ from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, R
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
 from keras.losses import kullback_leibler_divergence as KLD
-from keras.losses import binary_crossentropy
 from keras.applications import resnet50
 from os import path, mkdir
 from skimage.transform import resize
@@ -21,12 +20,14 @@ import logging
 import keras.backend as K
 import pandas as pd
 import tifffile as tif
+from scipy.misc import imread 
 
 import sys
 sys.path.append('.')
 from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, TAGS, onehot_F2, random_transforms
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
+from planet.utils import model_utils
 
 
 class SamplePlot(Callback):  # copied unmodified from indiconv.py and vggnet.py - 5/16/2017
@@ -47,7 +48,7 @@ class SamplePlot(Callback):  # copied unmodified from indiconv.py and vggnet.py 
         import matplotlib.pyplot as plt
 
         imgs_batch, tags_batch = next(self.batch_gen)
-        tags_pred = model.net.predict(imgs_batch)
+        tags_pred = self.model.predict(imgs_batch)
 
         nrows, ncols = min(len(imgs_batch), 10), 2
         fig, _ = plt.subplots(nrows, ncols, figsize=(8, nrows * 2.5))
@@ -73,16 +74,16 @@ class SamplePlot(Callback):  # copied unmodified from indiconv.py and vggnet.py 
         plt.close()
 
 
-class ResNet50(object):
+class ResNet50_softmax(object):
 
-    def __init__(self, checkpoint_name='ResNet50'):
-
+    def __init__(self, checkpoint_name='ResNet50_softmax'):
         self.config = {
-            'input_shape': [224, 224, 4],
+            'input_shape': [224, 224, 3],
             'output_shape': [17, 2],
-            'batch_size': 50,  # Big boy GPU.
+            'batch_size': 65,  # Big boy GPU.
             'nb_epochs': 200,
             'trn_transform': True,
+            'imgs_dir': 'data/train-jpg-v2',
         }
 
         self.checkpoint_name = checkpoint_name
@@ -99,21 +100,20 @@ class ResNet50(object):
         return cpdir
 
     def create_net(self):
-        if tuple(self.config['input_shape']) != (224, 224, 4):
+        if tuple(self.config['input_shape']) != (224, 224, 3):
             print("ResNet50 has special restrictions on the input shape. Only remove this sys.exit call if you know what you're doing.")
             sys.exit(1)
 
         inputs = Input(shape=self.config['input_shape'])
-        res = resnet50.ResNet50(include_top=False, weights=None, input_tensor=inputs)
+        res = resnet50.ResNet50(include_top=False, input_tensor=inputs)
 
         # Add a classifier for each class instead of a single classifier.
-        res_out = Flatten()(res.output)
-        res_out = Dropout(0.1)(res_out)
-        # res_out = Dense(512, activation='relu')(x)
-
+        conv_flat = Flatten()(res.output)
         classifiers = []
+        
+        x = Dropout(0.1)(conv_flat)
         for n in range(self.config['output_shape'][0]):
-            classifiers.append(Dense(2, activation='softmax')(res_out))
+            classifiers.append(Dense(2, activation='softmax')(x))
 
         # Concatenate classifiers and reshape to match output shape.
         x = concatenate(classifiers, axis=-1)
@@ -140,20 +140,20 @@ class ResNet50(object):
 
         def dice_loss(yt, yp):
             return 1 - dice_coef(yt, yp)
-
+        
         def kl_loss(yt, yp):
             return KLD(K.flatten(yt) / K.sum(yt), K.flatten(yp) / K.sum(yp))
-
+ 
         def custom_loss(yt, yp):
-            return binary_crossentropy(yt, yp)
+            return dice_loss(yt, yp) + kl_loss(yt, yp)
 
-        self.net.compile(optimizer=Adam(0.001), metrics=[F2, dice_coef, kl_loss], loss=custom_loss)
+        self.net.compile(optimizer=Adam(0.0005), metrics=[F2, dice_loss, kl_loss], loss=custom_loss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
     def train(self):
 
-        batch_gen = self.train_batch_gen('data/train_v2.csv', 'data/train-tif-v2')
+        batch_gen = self.train_batch_gen('data/train_v2.csv', 'data/train-jpg-v2')
 
         cb = [
             SamplePlot(batch_gen, '%s/samples.png' % self.cpdir),
@@ -166,11 +166,11 @@ class ResNet50(object):
         ]
 
         self.net.fit_generator(batch_gen, steps_per_epoch=500, verbose=1, callbacks=cb,
-                               epochs=self.config['nb_epochs'], workers=1, pickle_safe=True, max_q_size=100)
+                               epochs=self.config['nb_epochs'], workers=3, pickle_safe=True, max_q_size=100)
 
         return
 
-    def train_batch_gen(self, csv_path='data/train_v2.csv', imgs_dir='data/train-tif-v2'):
+    def train_batch_gen(self, csv_path='data/train_v2.csv', imgs_dir='data/train-jpg-v2'):
 
         logger = logging.getLogger(funcname())
 
@@ -180,7 +180,7 @@ class ResNet50(object):
 
         # Read the CSV and error-check contents.
         df = pd.read_csv(csv_path)
-        img_names = ['%s/%s.tif' % (imgs_dir, n) for n in df['image_name'].values]
+        img_names = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
         tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
 
         # Error check.
@@ -198,122 +198,29 @@ class ResNet50(object):
             for batch_idx in range(self.config['batch_size']):
                 data_idx = self.rng.randint(0, len(img_names))
 
-                try:
-                    img = resize(tif.imread(img_names[data_idx]), self.config[
-                                 'input_shape'][:2], preserve_range=True, mode='constant')
-                    if self.config['trn_transform']:
-                        imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=2))
-                    else:
-                        imgs_batch[batch_idx] = scale(img)
-                    tags_batch[batch_idx] = tagset_to_onehot(tag_sets[data_idx])
-                except Exception as e:
-                    pass
+                img = resize(imread(img_names[data_idx], mode='RGB'), self.config[
+                             'input_shape'][:2], preserve_range=True, mode='constant')
+                if self.config['trn_transform']:
+                    imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=2))
+                else:
+                    imgs_batch[batch_idx] = scale(img)
+                tags_batch[batch_idx] = tagset_to_onehot(tag_sets[data_idx])
 
             yield imgs_batch, tags_batch
 
     def predict(self, img_batch):
-
         scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
 
         for idx in range(len(img_batch)):
             img_batch[idx] = scale(img_batch[idx])
 
-        tags_pred = model.net.predict(img_batch)
+        tags_pred = self.net.predict(img_batch)
         tags_pred = tags_pred.round().astype(np.uint8)
 
+        # Convert from onehot to an array of bools
+        tags_pred = tags_pred[:, :, 1]
         return tags_pred
 
-if __name__ == "__main__":  # copied unmodified from vggnet.py and indiconv.py (except for the word ResNet50)
-
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger('ResNet50')
-
-    parser = argparse.ArgumentParser(description='ResNet50 Model.')
-    sub = parser.add_subparsers(title='actions', description='Choose an action.')
-
-    # Training.
-    parser_train = sub.add_parser('train', help='training')
-    parser_train.set_defaults(which='train')
-    parser_train.add_argument('-c', '--config', help='config file')
-    parser_train.add_argument('-w', '--weights', help='network weights')
-
-    # Prediction / submission.
-    parser_predict = sub.add_parser('predict', help='make predictions')
-    parser_predict.set_defaults(which='predict')
-    parser_predict.add_argument('dataset', help='dataset', choices=['train', 'test'])
-    parser_predict.add_argument('-c', '--config', help='config file')
-    parser_predict.add_argument('-w', '--weights', help='network weights', required=True)
-
-    args = vars(parser.parse_args())
-    assert args['which'] in ['train', 'predict']
-
-    model = ResNet50()
-    model.create_net()
-
-    if args['weights'] is not None:
-        logger.info('Loading network weights from %s.' % args['weights'])
-        model.net.load_weights(args['weights'])
-
-    if args['which'] == 'train':
-        model.train()
-
-    elif args['which'] == 'predict' and args['dataset'] == 'train':
-        df = pd.read_csv('data/train_v2.csv')
-        img_batch = np.empty([model.config['batch_size'], ] + model.config['input_shape'])
-        F2_scores = []
-
-        # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size']):
-
-            # Read images, extract tags.
-            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
-            tags_true = df[idx:idx + model.config['batch_size']]['tags'].values
-            for _, img_name in enumerate(img_names):
-                try:
-                    img_batch[_] = resize(tif.imread('data/train-tif-v2/%s.tif' % img_name),
-                                          model.config['input_shape'][:2], preserve_range=True, mode='constant')
-                except Exception as e:
-                    logger.error('Bad image: %s' % img_name)
-                    pass
-
-            # Make predictions, compute F2 and store it.
-            tags_pred = model.predict(img_batch)
-            for tt, tp in zip(tags_true, tags_pred):
-                tt = tagset_to_onehot(set(tt.split(' ')))
-                F2_scores.append(onehot_F2(tt, tp))
-
-            # Progress...
-            logger.info('%d/%d, %.2lf, %.2lf' % (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
-
-    elif args['which'] == 'predict' and args['dataset'] == 'test':
-        df = pd.read_csv('data/sample_submission_v2.csv')
-        img_batch = np.zeros([model.config['batch_size'], ] + model.config['input_shape'])
-        submission_rows = []
-
-        # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size']):
-
-            # Read images.
-            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
-            for _, img_name in enumerate(img_names):
-                try:
-                    img_batch[_] = resize(tif.imread('data/test-tif-v2/%s.tif' % img_name),
-                                          model.config['input_shape'][:2], preserve_range=True, mode='constant')
-                except Exception as e:
-                    logger.error('Bad image: %s' % img_name)
-                    pass
-
-            # Make predictions, store image name and tags as list of lists.
-            tags_pred = model.predict(img_batch)
-            for img_name, tp in zip(img_names, tags_pred):
-                tp = ' '.join(onehot_to_taglist(tp))
-                submission_rows.append([img_name, tp])
-
-            # Progress...
-            logger.info('%d/%d' % (idx, df.shape[0]))
-
-        # Convert list of lists to dataframe and save.
-        sub_path = '%s/submission_%s.csv' % (model.cpdir, str(int(time())))
-        df_sub = pd.DataFrame(submission_rows, columns=['image_name', 'tags'])
-        df_sub.to_csv(sub_path, index=False)
-        logger.info('Submission saved to %s.' % sub_path)
+if __name__ == "__main__":
+    from planet.model_runner import model_runner
+    model_runner(ResNet50_softmax)
