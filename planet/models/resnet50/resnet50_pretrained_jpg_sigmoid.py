@@ -20,7 +20,7 @@ import logging
 import keras.backend as K
 import pandas as pd
 import tifffile as tif
-from scipy.misc import imread 
+from scipy.misc import imread
 
 import sys
 sys.path.append('.')
@@ -107,7 +107,6 @@ class ResNet50_sigmoid(object):
         inputs = Input(shape=self.config['input_shape'])
         res = resnet50.ResNet50(include_top=False, input_tensor=inputs)
 
-
         x = Flatten()(res.output)
         x = Dropout(0.1)(x)
         x = Dense(17, activation="sigmoid")(x)
@@ -134,10 +133,10 @@ class ResNet50_sigmoid(object):
 
         def dice_loss(yt, yp):
             return 1 - dice_coef(yt, yp)
-        
+
         def kl_loss(yt, yp):
             return KLD(K.flatten(yt) / K.sum(yt), K.flatten(yp) / K.sum(yp))
- 
+
         def custom_loss(yt, yp):
             return dice_loss(yt, yp) + kl_loss(yt, yp)
 
@@ -193,7 +192,7 @@ class ResNet50_sigmoid(object):
                 data_idx = self.rng.randint(0, len(img_names))
 
                 img = resize(imread(img_names[data_idx], mode='RGB'), self.config[
-                                 'input_shape'][:2], preserve_range=True, mode='constant')
+                    'input_shape'][:2], preserve_range=True, mode='constant')
                 if self.config['trn_transform']:
                     imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=2))
                 else:

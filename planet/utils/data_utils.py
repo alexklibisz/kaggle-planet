@@ -10,7 +10,6 @@ from planet.utils.runtime import memory_usage
 # Never change the order here.
 TAGS = sorted(['agriculture', 'artisinal_mine', 'bare_ground', 'blooming', 'blow_down', 'clear', 'cloudy', 'conventional_mine',
                'cultivation', 'habitation', 'haze', 'partly_cloudy', 'primary', 'road', 'selective_logging', 'slash_burn', 'water'])
-# TAG_TO_IDX = {l: idx for idx, l in enumerate(TAGS)}
 
 
 def tagset_to_onehot(tagset):
@@ -20,12 +19,13 @@ def tagset_to_onehot(tagset):
     return tags
 
 
-def tagset_to_boolarray(tagset):
-    tags = np.zeros((len(TAGS), 1), dtype=np.uint8)
+def tagset_to_ints(tagset):
+    tags = np.zeros((len(TAGS)), dtype=np.uint8)
     for idx, tag in enumerate(TAGS):
         if tag in tagset:
             tags[idx] = 1
     return tags
+
 
 def boolarray_to_taglist(boolarray):
     taglist = []
@@ -33,6 +33,7 @@ def boolarray_to_taglist(boolarray):
         if boolarray[idx] == 1:
             taglist.append(tag)
     return taglist
+
 
 def onehot_to_taglist(onehot):
     taglist = []
@@ -56,6 +57,7 @@ def onehot_F2(A, B):
     r = onehot_recall(A, B)
     return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
 
+
 def bool_F2(A, B):
     beta = 2
     p = precision_score(A, B)
@@ -72,13 +74,13 @@ def random_transforms(img, nb_min=0, nb_max=2, rng=np.random):
         lambda x: np.fliplr(x),
         lambda x: np.roll(x, rng.randint(1, x.shape[0]), 0),
         lambda x: np.roll(x, rng.randint(1, x.shape[1]), 1),
-        lambda x: sktf.rotate(x, angle=rng.randint(1, 360), preserve_range=True, mode='reflect'),
+        # lambda x: sktf.rotate(x, angle=rng.randint(1, 360), preserve_range=True, mode='reflect'),
 
-        # Resize up to 4px in horizontal or vertical direction. Crop starting at top left or bottom right.
-        lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[1] + rng.randint(0, 4)),
-                              preserve_range=True, mode='constant')[:x.shape[0], :x.shape[1], :],
-        lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[1] + rng.randint(0, 4)),
-                              preserve_range=True, mode='constant')[-x.shape[0]:, -x.shape[1]:, :],
+        # # Resize up to 4px in horizontal or vertical direction. Crop starting at top left or bottom right.
+        # lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[1] + rng.randint(0, 4)),
+        #                       preserve_range=True, mode='constant')[:x.shape[0], :x.shape[1], :],
+        # lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[1] + rng.randint(0, 4)),
+        #                       preserve_range=True, mode='constant')[-x.shape[0]:, -x.shape[1]:, :],
     ]
 
     nb = rng.randint(nb_min, nb_max)
