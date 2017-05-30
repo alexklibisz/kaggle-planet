@@ -65,7 +65,7 @@ class SamplePlot(Callback):
             ax1, ax2 = fig.axes[idx * 2 + 0], fig.axes[idx * 2 + 1]
             ax1.axis('off')
             ax1.imshow(img[:, :, :3])
-            tt, tp = K.round(tt), K.round(tp)
+            tt, tp = tt.round().astype(np.float32), tp.round().astype(np.float32)
             ax2.scatter(scatter_x, tp - tt, marker='x')
             ax2.set_xticks(scatter_x)
             ax2.set_xticklabels(scatter_xticks, rotation='vertical')
@@ -159,9 +159,15 @@ class Godard(object):
             # pdb.set_trace()
             break
 
+	# Make sure the history doesn't get cleared out each training run
+        history_plot = HistoryPlot('%s/history.png' % self.cpdir)
+        def empty(self):
+            pass
+        history_plot.on_train_begin = empty
+
         cb = [
             SamplePlot(train_batch_gen, '%s/samples.png' % self.cpdir),
-            HistoryPlot('%s/history.png' % self.cpdir),
+            history_plot,
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/loss.weights' % self.cpdir, monitor='val_acc', verbose=1, # monitor was 'loss'
                             save_best_only=True, mode='auto', save_weights_only=True), # mode was 'min'
@@ -183,8 +189,8 @@ class Godard(object):
         epochs_arr = [10, 5, 5]
         learn_rates = [0.001, 0.0001, 0.00001]
 
-        train_steps = ceil(self.num_examples/self.config['batch_size'])
-        validation_steps = ceil(train_steps*self.config['validation_split_size'])
+        train_steps = ceil((1 - self.config['validation_split_size']) * self.num_examples/self.config['batch_size'])
+        validation_steps = ceil(self.config['validation_split_size'] * self.num_examples/self.config['batch_size'])
         for learn_rate, epochs in zip(learn_rates, epochs_arr):
             self.net.compile(optimizer=Adam(learn_rate), metrics=[F2, 'accuracy'], loss='binary_crossentropy')
             self.net.fit_generator(train_batch_gen, steps_per_epoch=train_steps, verbose=1, callbacks=cb,
