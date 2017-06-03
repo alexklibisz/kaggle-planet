@@ -9,22 +9,21 @@ from keras.optimizers import Adam
 from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
 from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LearningRateScheduler
 from keras.losses import kullback_leibler_divergence as KLD
 from keras.losses import binary_crossentropy
 from keras.applications import resnet50
-from os import path, mkdir
+from math import ceil
+from os import path, mkdir, listdir
+from PIL import Image
 from skimage.transform import resize
 from time import time
 import argparse
 import logging
 import keras.backend as K
 import pandas as pd
-from scipy.misc import imread
 import tifffile as tif
-from sklearn.model_selection import train_test_split
-from math import ceil
-from random import shuffle
+
 
 import sys
 sys.path.append('.')
@@ -32,7 +31,6 @@ from planet.utils.data_utils import tagset_to_ints, onehot_to_taglist, TAGS, one
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
-from PIL import Image
 
 class SamplePlot(Callback):
 
@@ -86,19 +84,18 @@ class Godard(object):
         self.config = {
             'input_shape': [64, 64, 3],
             'output_shape': [17],
-            'batch_size': 300,  # Big boy GPU.
-            # 'nb_epochs': 200,
-            'validation_split_size': 0.2,
-            'trn_transform': True,
+            'batch_size': 128,  # Big boy GPU.
+            'trn_nb_epochs': 20,
+            'trn_transform': False,
             'trn_imgs_csv': 'data/train_v2.csv',
             'trn_imgs_dir': 'data/train-jpg',
             'tst_imgs_csv': 'data/sample_submission_v2.csv',
-            'tst_imgs_dir': 'data/test-jpg'
+            'tst_imgs_dir': 'data/test-jpg',
+            'trn_prop_trn': 0.8,
+            'trn_prop_val': 0.2
         }
 
         self.checkpoint_name = checkpoint_name
-        self.imgs = []
-        self.lbls = []
         self.net = None
         self.rng = np.random
 
@@ -140,43 +137,13 @@ class Godard(object):
         x = Dense(512, activation='relu')(x)
         x = BatchNormalization()(x)
         x = Dropout(0.5)(x)
-        labels = Dense(self.config['output_shape'][0], activation='sigmoid', name='labels')(x)
+        labels = Dense(self.config['output_shape'][0], activation='sigmoid')(x)
 
         self.net = Model(inputs=inputs, outputs=labels)
 
-
-        # self.net.compile(optimizer=Adam(0.001), metrics=[F2, dice_coef, kl_loss], loss=custom_loss)
-        self.net.summary()
-        plot_model(self.net, to_file='%s/net.png' % self.cpdir)
-
-    def train(self):
-        train_batch_gen, validate_batch_gen = self.get_batch_gens(self.config['trn_imgs_csv'], 
-                                                                self.config['trn_imgs_dir'], 
-                                                                self.config['validation_split_size'])
-
-        for i in train_batch_gen:
-            # import pdb
-            # pdb.set_trace()
-            break
-
-	# Make sure the history doesn't get cleared out each training run
-        history_plot = HistoryPlot('%s/history.png' % self.cpdir)
-        def empty(self):
-            pass
-        history_plot.on_train_begin = empty
-
-        cb = [
-            SamplePlot(train_batch_gen, '%s/samples.png' % self.cpdir),
-            history_plot,
-            CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/loss.weights' % self.cpdir, monitor='val_acc', verbose=1, # monitor was 'loss'
-                            save_best_only=True, mode='auto', save_weights_only=True), # mode was 'min'
-            # ReduceLROnPlateau(monitor='loss', factor=0.8, patience=2, epsilon=0.005, verbose=1, mode='min'),
-            EarlyStopping(monitor='val_loss', patience=3, verbose=0, mode='auto') # monitor='loss', patience=15, mode='min', min_delta=0.01
-        ]
-
-        def F2(yt, yp):
-            yt, yp = K.round(yt), K.round(yp)
+        def F2(yt, yp, threshold=0.2):
+            # yt, yp = K.round(yt), K.round(yp)
+            yp = K.cast(yp > threshold, 'float')
             tp = K.sum(yt * yp)
             fp = K.sum(K.clip(yp - yt, 0, 1))
             fn = K.sum(K.clip(yt - yp, 0, 1))
@@ -185,77 +152,68 @@ class Godard(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
+        self.net.compile(optimizer=Adam(1e-3), metrics=[F2, 'accuracy'], loss='binary_crossentropy')
+        self.net.summary()
+        plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
-        epochs_arr = [10, 5, 5]
-        learn_rates = [0.001, 0.0001, 0.00001]
+    def train(self, rng=np.random):
 
-        train_steps = ceil((1 - self.config['validation_split_size']) * self.num_examples/self.config['batch_size'])
-        validation_steps = ceil(self.config['validation_split_size'] * self.num_examples/self.config['batch_size'])
-        for learn_rate, epochs in zip(learn_rates, epochs_arr):
-            self.net.compile(optimizer=Adam(learn_rate), metrics=[F2, 'accuracy'], loss='binary_crossentropy')
-            self.net.fit_generator(train_batch_gen, steps_per_epoch=train_steps, verbose=1, callbacks=cb,
-                                   epochs=epochs, workers=3, pickle_safe=True, max_q_size=100,
-                                   validation_data=validate_batch_gen, validation_steps=validation_steps)
+        imgs_idxs = np.arange(len(listdir(self.config['trn_imgs_dir'])))
+        imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
+        imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
+        imgs_idxs_val = imgs_idxs[-int(len(imgs_idxs) * self.config['trn_prop_val']):]
+        gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn)
+        gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val)
 
-        return
+        def lrsched(epoch):
+            if epoch < 10:
+                return 1e-3
+            elif epoch < 15:
+                return 1e-4
+            else:
+                return 1e-5
 
-    def get_batch_gens(self, csv_path, imgs_dir, validation_split_size):
+        cb = [
+            HistoryPlot('%s/history.png' % self.cpdir),
+            SamplePlot(gen_trn, '%s/samples.png' % self.cpdir),
+            CSVLogger('%s/history.csv' % self.cpdir),
+            ModelCheckpoint('%s/weights_val_acc.hdf5' % self.cpdir, monitor='val_acc', verbose=1,
+                            save_best_only=True, mode='max', save_weights_only=True),
+            ModelCheckpoint('%s/weights_val_loss.hdf5' % self.cpdir, monitor='val_loss', verbose=1,
+                            save_best_only=True, mode='min', save_weights_only=True),
+            EarlyStopping(monitor='val_loss', patience=3, verbose=0, mode='min'),
+            LearningRateScheduler(lrsched)
+        ]
 
-        logger = logging.getLogger(funcname())
+        # Steps should run through the full training / validation set per epoch.
+        nb_steps_trn = ceil(len(imgs_idxs_trn) * 1. / self.config['batch_size'])
+        nb_steps_val = ceil(len(imgs_idxs_val) * 1. / self.config['batch_size'])
 
-        # Read the CSV and error-check contents.
-        df = pd.read_csv(csv_path)
-        img_names = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
+        self.net.fit_generator(gen_trn, steps_per_epoch=nb_steps_trn, epochs=self.config['trn_nb_epochs'],
+                               verbose=1, callbacks=cb, workers=3, pickle_safe=True, max_q_size=100,
+                               validation_data=gen_val, validation_steps=nb_steps_val)
+
+    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, rng=np.random):
+
+        # Read the CSV and extract image names and tags.
+        df = pd.read_csv(imgs_csv)
+        imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
         tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
 
-        # Error check.
-        for img_name, tag_set in zip(img_names, tag_sets):
-            assert path.exists(img_name), img_name
-            assert len(tag_set) > 0, tag_set
-
-        # Record the number of images
-        self.num_examples = len(img_names)
-
-        imgs_train, imgs_test, tags_train, tags_test = train_test_split(img_names, tag_sets, test_size=validation_split_size, random_state=42)
-        
-        return self.batch_gen(imgs_train, tags_train), self.batch_gen(imgs_test, tags_test)
-
-    def batch_gen(self, img_names, tag_sets):
-        # Helper
-        # scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
-
-        data_idxs = list(range(len(img_names)))
-        batch_idx = 0
         while True:
-            
-            # New batches at each iteration to prevent over-writing previous batch before it's used.
-            imgs_batch = np.zeros([self.config['batch_size'], ] + self.config['input_shape'], dtype=np.float32)
-            tags_batch = np.zeros([self.config['batch_size'], ] + self.config['output_shape'], dtype=np.uint8)
 
-            # Run through the data in a random order
-            shuffle(data_idxs)
-            for data_idx in data_idxs:
-                img = Image.open(img_names[data_idx])
+            imgs_batch = np.zeros([self.config['batch_size'], ] + self.config['input_shape'])
+            tags_batch = np.zeros([self.config['batch_size'], ] + self.config['output_shape'])
+            _imgs_idxs = cycle(rng.choice(imgs_idxs, len(imgs_idxs)))
+
+            for batch_idx in range(self.config['batch_size']):
+                img_idx = next(_imgs_idxs)
+                img = Image.open(imgs_paths[img_idx]).convert('RGB')
                 img.thumbnail(self.config['input_shape'][:2])
-                img = np.array(img.convert("RGB"), dtype=np.float32) / 255
-                # img = resize(imread(img_names[data_idx], mode='RGB'), self.config[
-                #              'input_shape'][:2], preserve_range=True, mode='constant')
-                if self.config['trn_transform']:
-                    imgs_batch[batch_idx] = random_transforms(img, nb_min=0, nb_max=2)
-                    # imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=2))
-                else:
-                    imgs_batch[batch_idx] = scale(img)
+                imgs_batch[batch_idx] = np.asarray(img, dtype=np.float32) / 255.
+                tags_batch[batch_idx] = tagset_to_ints(tag_sets[img_idx])
 
-                tags_batch[batch_idx] = tagset_to_ints(tag_sets[data_idx])
-
-                batch_idx += 1
-
-                # Yield batch if it's big enough
-                if batch_idx >= self.config['batch_size']:
-                    batch_idx = 0
-                    yield imgs_batch, tags_batch
-                    break
-
+            yield imgs_batch, tags_batch
 
     def predict(self, img_batch):
 
