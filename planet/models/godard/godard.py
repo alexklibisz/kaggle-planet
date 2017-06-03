@@ -85,8 +85,8 @@ class Godard(object):
             'input_shape': [64, 64, 3],
             'output_shape': [17],
             'batch_size': 128,  # Big boy GPU.
-            'trn_nb_epochs': 20,
-            'trn_transform': False,
+            'trn_nb_epochs': 30,
+            'trn_transform': True,
             'trn_imgs_csv': 'data/train_v2.csv',
             'trn_imgs_dir': 'data/train-jpg',
             'tst_imgs_csv': 'data/sample_submission_v2.csv',
@@ -162,13 +162,14 @@ class Godard(object):
         imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
         imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
         imgs_idxs_val = imgs_idxs[-int(len(imgs_idxs) * self.config['trn_prop_val']):]
-        gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn)
-        gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val)
+        gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn,
+                                 self.config['trn_transform'])
+        gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val, False)
 
         def lrsched(epoch):
-            if epoch < 10:
+            if epoch < 15:
                 return 1e-3
-            elif epoch < 15:
+            elif epoch < 23:
                 return 1e-4
             else:
                 return 1e-5
@@ -181,7 +182,7 @@ class Godard(object):
                             save_best_only=True, mode='max', save_weights_only=True),
             ModelCheckpoint('%s/weights_val_loss.hdf5' % self.cpdir, monitor='val_loss', verbose=1,
                             save_best_only=True, mode='min', save_weights_only=True),
-            EarlyStopping(monitor='val_loss', patience=3, verbose=0, mode='min'),
+            EarlyStopping(monitor='val_loss', patience=3, verbose=1, mode='min'),
             LearningRateScheduler(lrsched)
         ]
 
@@ -193,7 +194,7 @@ class Godard(object):
                                verbose=1, callbacks=cb, workers=3, pickle_safe=True, max_q_size=100,
                                validation_data=gen_val, validation_steps=nb_steps_val)
 
-    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, rng=np.random):
+    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, transform=False, rng=np.random):
 
         # Read the CSV and extract image names and tags.
         df = pd.read_csv(imgs_csv)
@@ -208,7 +209,10 @@ class Godard(object):
 
             for batch_idx in range(self.config['batch_size']):
                 img_idx = next(_imgs_idxs)
-                imgs_batch[batch_idx] = self.img_path_to_img(imgs_paths[img_idx])
+                img = self.img_path_to_img(imgs_paths[img_idx])
+                if transform:
+                    img = random_transforms(img, nb_min=0, nb_max=4)
+                imgs_batch[batch_idx] = img
                 tags_batch[batch_idx] = tagset_to_ints(tag_sets[img_idx])
 
             yield imgs_batch, tags_batch
