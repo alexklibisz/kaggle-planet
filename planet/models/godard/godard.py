@@ -208,25 +208,20 @@ class Godard(object):
 
             for batch_idx in range(self.config['batch_size']):
                 img_idx = next(_imgs_idxs)
-                img = Image.open(imgs_paths[img_idx]).convert('RGB')
-                img.thumbnail(self.config['input_shape'][:2])
-                imgs_batch[batch_idx] = np.asarray(img, dtype=np.float32) / 255.
+                imgs_batch[batch_idx] = self.img_path_to_img(imgs_paths[img_idx])
                 tags_batch[batch_idx] = tagset_to_ints(tag_sets[img_idx])
 
             yield imgs_batch, tags_batch
 
+    def img_path_to_img(self, img_path):
+        img = Image.open(img_path).convert('RGB')
+        img.thumbnail(self.config['input_shape'][:2])
+        img = np.asarray(img, dtype=np.float32) / 255.
+        return img
+
     def predict(self, img_batch):
-
-        scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
-
-        for idx in range(len(img_batch)):
-            img_batch[idx] = scale(img_batch[idx])
-
         tags_pred = self.net.predict(img_batch)
-        tags_pred = tags_pred.round().astype(np.uint8)
-
-        # Convert from onehot to an array of bools
-        tags_pred = tags_pred[:, :, 1]
+        tags_pred = (tags_pred > 0.2).astype(np.uint8)
         return tags_pred
 
 if __name__ == "__main__":

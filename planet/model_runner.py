@@ -40,13 +40,13 @@ def model_runner(model):
     args = vars(parser.parse_args())
     assert args['which'] in ['train', 'predict']
 
-    # Set up functions for reading images
+    # Set up functions for convert image name to its path
     if 'tif' in model.config['trn_imgs_dir']:
-        read_training_image = lambda img_name: tif.imread('%s/%s.tif' % (model.config['trn_imgs_dir'], img_name))
-        read_testing_image = lambda img_name: tif.imread('%s/%s.tif' % (model.config['tst_imgs_dir'], img_name))
+        get_img_path_trn = lambda img_name: '%s/%s.tif' % (model.config['trn_imgs_dir'], img_name)
+        get_img_path_tst = lambda img_name: '%s/%s.tif' % (model.config['tst_imgs_dir'], img_name)
     elif 'jpg' in model.config['trn_imgs_dir']:
-        read_training_image = lambda img_name: imread('%s/%s.jpg' % (model.config['trn_imgs_dir'], img_name), mode='RGB')
-        read_testing_image = lambda img_name: imread('%s/%s.jpg' % (model.config['tst_imgs_dir'], img_name), mode='RGB')
+        get_img_path_trn = lambda img_name: '%s/%s.jpg' % (model.config['trn_imgs_dir'], img_name)
+        get_img_path_tst = lambda img_name: '%s/%s.jpg' % (model.config['tst_imgs_dir'], img_name)
     else:
         logger.error('imgs_dir must have tif or jpg in it so I know how to read the images: %s' %
                      model.config['imgs_dir'])
@@ -74,8 +74,8 @@ def model_runner(model):
             img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
             tags_true = df[idx:idx + model.config['batch_size']]['tags'].values
             for _, img_name in enumerate(img_names):
-                img_batch[_] = resize(read_training_image(img_name),
-                                      model.config['input_shape'][:2], preserve_range=True, mode='constant')
+                img_path = get_img_path_trn(img_name)
+                img_batch[_] = model.img_path_to_img(img_path)
 
             # Make predictions, compute F2 and store it.
             tags_pred = model.predict(img_batch)
@@ -99,8 +99,8 @@ def model_runner(model):
             # Read images.
             img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
             for _, img_name in enumerate(img_names):
-                img_batch[_] = resize(read_testing_image(img_name),
-                                      model.config['input_shape'][:2], preserve_range=True, mode='constant')
+                img_path = get_img_path_tst(img_name)
+                img_batch[_] = model.img_path_to_img(img_path)
 
             # Make predictions, store image name and tags as list of lists.
             tags_pred = model.predict(img_batch)
