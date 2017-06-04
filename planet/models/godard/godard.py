@@ -84,7 +84,9 @@ class Godard(object):
         self.config = {
             'input_shape': [64, 64, 3],
             'output_shape': [17],
-            'batch_size': 128,  # Big boy GPU.
+            'sigmoid_threshold': 0.2,
+            'batch_size_tst': 500,
+            'batch_size_trn': 128,
             'trn_nb_epochs': 30,
             'trn_transform': True,
             'trn_imgs_csv': 'data/train_v2.csv',
@@ -113,22 +115,22 @@ class Godard(object):
         x = BatchNormalization(input_shape=self.config['input_shape'])(inputs)
 
         x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
-        x = Conv2D(32, (3, 3), activation='relu')(x)
+        x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
         x = MaxPooling2D(pool_size=2)(x)
         x = Dropout(0.25)(x)
 
         x = Conv2D(64, (3, 3), padding='same', activation='relu')(x)
-        x = Conv2D(64, (3, 3), activation='relu')(x)
+        x = Conv2D(64, (3, 3), padding='same', activation='relu')(x)
         x = MaxPooling2D(pool_size=2)(x)
         x = Dropout(0.25)(x)
 
         x = Conv2D(128, (3, 3), padding='same', activation='relu')(x)
-        x = Conv2D(128, (3, 3), activation='relu')(x)
+        x = Conv2D(128, (3, 3), padding='same', activation='relu')(x)
         x = MaxPooling2D(pool_size=2)(x)
         x = Dropout(0.25)(x)
 
         x = Conv2D(256, (3, 3), padding='same', activation='relu')(x)
-        x = Conv2D(256, (3, 3), activation='relu')(x)
+        x = Conv2D(256, (3, 3), padding='same', activation='relu')(x)
         x = MaxPooling2D(pool_size=2)(x)
         x = Dropout(0.25)(x)
 
@@ -141,9 +143,9 @@ class Godard(object):
 
         self.net = Model(inputs=inputs, outputs=labels)
 
-        def F2(yt, yp, threshold=0.2):
+        def F2(yt, yp):
             # yt, yp = K.round(yt), K.round(yp)
-            yp = K.cast(yp > threshold, 'float')
+            yp = K.cast(yp > self.config['sigmoid_threshold'], 'float')
             tp = K.sum(yt * yp)
             fp = K.sum(K.clip(yp - yt, 0, 1))
             fn = K.sum(K.clip(yt - yp, 0, 1))
@@ -152,6 +154,23 @@ class Godard(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
+        # def wlogloss(yt, yp):
+        #     w = 1.2  # weight for false negative errors.
+
+        #     # Binary mask for locations of false negatives.
+        #     false_neg = K.clip(yt - K.cast((yp > self.config['sigmoid_threshold']), 'float'), 0, 1)
+
+        #     # Compute the standard log loss error at each location.
+        #     eps = K.epsilon()
+        #     errs = -((yt * K.log(yp + eps)) + ((1 - yt) * K.log(1 - yp + eps)))
+
+        #     # Subtract the error for all false negatives. T
+        #     # Then add the error back multiplied by the weight.
+        #     errs = (errs - (errs * false_neg)) + (errs * false_neg * w)
+
+        #     return K.mean(errs)
+
+        # self.net.compile(optimizer=Adam(1e-3), metrics=[F2, 'accuracy'], loss=wlogloss)
         self.net.compile(optimizer=Adam(1e-3), metrics=[F2, 'accuracy'], loss='binary_crossentropy')
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
@@ -187,8 +206,8 @@ class Godard(object):
         ]
 
         # Steps should run through the full training / validation set per epoch.
-        nb_steps_trn = ceil(len(imgs_idxs_trn) * 1. / self.config['batch_size'])
-        nb_steps_val = ceil(len(imgs_idxs_val) * 1. / self.config['batch_size'])
+        nb_steps_trn = ceil(len(imgs_idxs_trn) * 1. / self.config['batch_size_trn'])
+        nb_steps_val = ceil(len(imgs_idxs_val) * 1. / self.config['batch_size_trn'])
 
         self.net.fit_generator(gen_trn, steps_per_epoch=nb_steps_trn, epochs=self.config['trn_nb_epochs'],
                                verbose=1, callbacks=cb, workers=3, pickle_safe=True, max_q_size=100,
@@ -203,11 +222,11 @@ class Godard(object):
 
         while True:
 
-            imgs_batch = np.zeros([self.config['batch_size'], ] + self.config['input_shape'])
-            tags_batch = np.zeros([self.config['batch_size'], ] + self.config['output_shape'])
+            imgs_batch = np.zeros([self.config['batch_size_trn'], ] + self.config['input_shape'])
+            tags_batch = np.zeros([self.config['batch_size_trn'], ] + self.config['output_shape'])
             _imgs_idxs = cycle(rng.choice(imgs_idxs, len(imgs_idxs)))
 
-            for batch_idx in range(self.config['batch_size']):
+            for batch_idx in range(self.config['batch_size_trn']):
                 img_idx = next(_imgs_idxs)
                 img = self.img_path_to_img(imgs_paths[img_idx])
                 if transform:
@@ -225,7 +244,7 @@ class Godard(object):
 
     def predict(self, img_batch):
         tags_pred = self.net.predict(img_batch)
-        tags_pred = (tags_pred > 0.2).astype(np.uint8)
+        tags_pred = (tags_pred > self.config['sigmoid_threshold']).astype(np.uint8)
         return tags_pred
 
 if __name__ == "__main__":

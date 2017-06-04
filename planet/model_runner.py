@@ -12,7 +12,8 @@ from planet.utils.data_utils import bool_F2, tagset_to_ints, boolarray_to_taglis
 
 def model_runner(model):
 
-    assert 'batch_size' in model.config
+    assert 'batch_size_trn' in model.config
+    assert 'batch_size_tst' in model.config
     assert 'input_shape' in model.config
     assert 'trn_imgs_dir' in model.config
     assert 'trn_imgs_csv' in model.config
@@ -64,15 +65,15 @@ def model_runner(model):
 
     elif args['which'] == 'predict' and args['dataset'] == 'train':
         df = pd.read_csv(model.config['trn_imgs_csv'])
-        img_batch = np.empty([model.config['batch_size'], ] + model.config['input_shape'])
+        img_batch = np.empty([model.config['batch_size_tst'], ] + model.config['input_shape'])
         F2_scores = []
 
         # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size']):
+        for idx in range(0, df.shape[0], model.config['batch_size_tst']):
 
             # Read images, extract tags.
-            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
-            tags_true = df[idx:idx + model.config['batch_size']]['tags'].values
+            img_names = df[idx:idx + model.config['batch_size_tst']]['image_name'].values
+            tags_true = df[idx:idx + model.config['batch_size_tst']]['tags'].values
             for _, img_name in enumerate(img_names):
                 img_path = get_img_path_trn(img_name)
                 img_batch[_] = model.img_path_to_img(img_path)
@@ -89,15 +90,15 @@ def model_runner(model):
 
     elif args['which'] == 'predict' and args['dataset'] == 'test':
         df = pd.read_csv(model.config['tst_imgs_csv'])
-        img_batch = np.zeros([model.config['batch_size'], ] + model.config['input_shape'])
+        img_batch = np.zeros([model.config['batch_size_tst'], ] + model.config['input_shape'])
         submission_rows = []
         sub_path = '%s/submission_%s.csv' % (model.cpdir, str(int(time())))
 
         # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size']):
+        for idx in range(0, df.shape[0], model.config['batch_size_tst']):
 
             # Read images.
-            img_names = df[idx:idx + model.config['batch_size']]['image_name'].values
+            img_names = df[idx:idx + model.config['batch_size_tst']]['image_name'].values
             for _, img_name in enumerate(img_names):
                 img_path = get_img_path_tst(img_name)
                 img_batch[_] = model.img_path_to_img(img_path)
