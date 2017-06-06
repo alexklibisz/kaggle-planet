@@ -8,7 +8,7 @@ from time import time
 from skimage.transform import resize
 from scipy.misc import imread
 from planet.utils.data_utils import bool_F2, tagset_to_ints, boolarray_to_taglist
-
+from planet.utils.runtime import gpu_selection
 
 def model_runner(model):
 
@@ -25,6 +25,7 @@ def model_runner(model):
     logger = logging.getLogger(model_name)
 
     parser = argparse.ArgumentParser(description='%s Model...' % model_name)
+    parser.add_argument('-g', '--gpu', help='Tensorflow GPU index for multi-gpu machine.', type=str, default="0")
     sub = parser.add_subparsers(title='actions', description='Choose an action.')
 
     # Training.
@@ -41,17 +42,18 @@ def model_runner(model):
     args = vars(parser.parse_args())
     assert args['which'] in ['train', 'predict']
 
+    # Select the GPU.
+    gpu_selection(args['gpu'], 0.90)
+
     # Set up functions for convert image name to its path
+    assert 'tif' in model.config['trn_imgs_dir'] or 'jpg' in model.config['trn_imgs_dir']
+    assert 'tif' in model.config['tst_imgs_dir'] or 'jpg' in model.config['tst_imgs_dir']    
     if 'tif' in model.config['trn_imgs_dir']:
         get_img_path_trn = lambda img_name: '%s/%s.tif' % (model.config['trn_imgs_dir'], img_name)
         get_img_path_tst = lambda img_name: '%s/%s.tif' % (model.config['tst_imgs_dir'], img_name)
     elif 'jpg' in model.config['trn_imgs_dir']:
         get_img_path_trn = lambda img_name: '%s/%s.jpg' % (model.config['trn_imgs_dir'], img_name)
         get_img_path_tst = lambda img_name: '%s/%s.jpg' % (model.config['tst_imgs_dir'], img_name)
-    else:
-        logger.error('imgs_dir must have tif or jpg in it so I know how to read the images: %s' %
-                     model.config['imgs_dir'])
-        return 1
 
     # Create network before loading weights or training.
     model.create_net()

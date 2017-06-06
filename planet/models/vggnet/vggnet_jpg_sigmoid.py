@@ -66,6 +66,7 @@ class VGGNet(object):
         vgg = VGG19(include_top=False, input_tensor=x)
 
         outputs = Flatten()(vgg.output)
+        outputs = Dropout(0.1)(outputs)
         outputs = Dense(self.config['output_shape'][0], activation='sigmoid')(outputs)
 
         def true_pos(yt, yp):
@@ -101,10 +102,10 @@ class VGGNet(object):
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/loss.weights' % self.cpdir, monitor='loss', verbose=1,
                             save_best_only=True, mode='min', save_weights_only=True),
-            ModelCheckpoint('%s/dice_coef.weights' % self.cpdir, monitor='dice_coef',
+            ModelCheckpoint('%s/F2.weights' % self.cpdir, monitor='F2',
                             verbose=1, save_best_only=True, mode='max', save_weights_only=True),
-            ReduceLROnPlateau(monitor='loss', factor=0.8, patience=2, epsilon=0.005, verbose=1, mode='min'),
-            EarlyStopping(monitor='loss', min_delta=0.01, patience=10, verbose=1, mode='min')
+            ReduceLROnPlateau(monitor='F2', factor=0.8, patience=2, epsilon=0.005, verbose=1, mode='min'),
+            EarlyStopping(monitor='F2', min_delta=0.01, patience=10, verbose=1, mode='max')
         ]
 
         self.net.fit_generator(batch_gen, steps_per_epoch=self.config['trn_steps'], verbose=1, callbacks=cb,
@@ -151,7 +152,7 @@ class VGGNet(object):
                 img = img_preprocess(img)
                 img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
                 if transform:
-                    img = random_transforms(img)
+                    img = random_transforms(img, nb_min=0, nb_max=6)
                 imgs_batch[batch_idx] = img
                 tags_batch[batch_idx] = tagset_to_ints(tag_sets[data_idx])
 

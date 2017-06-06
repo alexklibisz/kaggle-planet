@@ -72,8 +72,8 @@ def random_transforms(img, nb_min=0, nb_max=2, rng=np.random):
         lambda x: np.rot90(x, k=rng.randint(1, 4), axes=(0, 1)),
         lambda x: np.flipud(x),
         lambda x: np.fliplr(x),
-        lambda x: np.roll(x, rng.randint(1, x.shape[0]), 0),
-        lambda x: np.roll(x, rng.randint(1, x.shape[1]), 1),
+        # lambda x: np.roll(x, rng.randint(1, x.shape[0]), 0),
+        # lambda x: np.roll(x, rng.randint(1, x.shape[1]), 1),
         # lambda x: sktf.rotate(x, angle=rng.randint(1, 360), preserve_range=True, mode='reflect'),
 
         # # Resize up to 4px in horizontal or vertical direction. Crop starting at top left or bottom right.

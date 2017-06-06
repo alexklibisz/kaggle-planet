@@ -1,7 +1,7 @@
 # Godard
 
 import numpy as np
-np.random.seed(317)
+np.random.seed(7606)
 
 from glob import glob
 from itertools import cycle
@@ -22,6 +22,7 @@ import argparse
 import logging
 import keras.backend as K
 import pandas as pd
+import pdb
 import tifffile as tif
 
 
@@ -79,13 +80,13 @@ class SamplePlot(Callback):
 
 class Godard(object):
 
-    def __init__(self, checkpoint_name='Godard'):
+    def __init__(self, checkpoint_name='godard_jpg_softmax'):
 
         self.config = {
-            'input_shape': [96, 96, 3],
+            'input_shape': [64, 64, 3],
             'output_shape': [17],
-            'sigmoid_threshold': 0.2,
-            'batch_size_tst': 1200,
+            'output_threshold': 0.5,
+            'batch_size_tst': 500,
             'batch_size_trn': 128,
             'trn_nb_epochs': 30,
             'trn_transform': True,
@@ -112,40 +113,59 @@ class Godard(object):
 
         inputs = Input(shape=self.config['input_shape'])
 
-        x = BatchNormalization(input_shape=self.config['input_shape'])(inputs)
+        x = BatchNormalization()(inputs)
 
         x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
         x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
         x = MaxPooling2D(pool_size=2)(x)
-        x = Dropout(0.25)(x)
+        x = Dropout(0.2)(x)
 
         x = Conv2D(64, (3, 3), padding='same', activation='relu')(x)
         x = Conv2D(64, (3, 3), padding='same', activation='relu')(x)
         x = MaxPooling2D(pool_size=2)(x)
-        x = Dropout(0.25)(x)
+        x = Dropout(0.2)(x)
 
         x = Conv2D(128, (3, 3), padding='same', activation='relu')(x)
         x = Conv2D(128, (3, 3), padding='same', activation='relu')(x)
         x = MaxPooling2D(pool_size=2)(x)
-        x = Dropout(0.25)(x)
+        x = Dropout(0.2)(x)
 
         x = Conv2D(256, (3, 3), padding='same', activation='relu')(x)
         x = Conv2D(256, (3, 3), padding='same', activation='relu')(x)
         x = MaxPooling2D(pool_size=2)(x)
-        x = Dropout(0.25)(x)
+        x = Dropout(0.2)(x)
 
         x = Flatten()(x)
 
+        x = Dense(1024, activation='relu')(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.2)(x)
+
         x = Dense(512, activation='relu')(x)
         x = BatchNormalization()(x)
-        x = Dropout(0.5)(x)
-        labels = Dense(self.config['output_shape'][0], activation='sigmoid')(x)
+        x = Dropout(0.2)(x)
+        shared_out = x
 
-        self.net = Model(inputs=inputs, outputs=labels)
+        # Individual softmax classifier for each class.
+        classifiers = []
+        for _ in range(17):
+            x = Dense(2, activation='softmax')(shared_out)
+            classifiers.append(x)
+
+        x = concatenate(classifiers, axis=-1)
+        x = Reshape((17, 2), name='labels')(x)
+        tags = Lambda(lambda x: x[:, :, 1])(x)
+
+        self.net = Model(inputs=inputs, outputs=tags)
+
+        def meanyt(yt, yp):
+            return K.mean(yt)
+
+        def meanyp(yt, yp):
+            return K.mean(yp)
 
         def F2(yt, yp):
-            # yt, yp = K.round(yt), K.round(yp)
-            yp = K.cast(yp > self.config['sigmoid_threshold'], 'float')
+            yp = K.cast(yp > self.config['output_threshold'], 'float')
             tp = K.sum(yt * yp)
             fp = K.sum(K.clip(yp - yt, 0, 1))
             fn = K.sum(K.clip(yt - yp, 0, 1))
@@ -154,7 +174,23 @@ class Godard(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        self.net.compile(optimizer=Adam(1e-3), metrics=[F2, 'accuracy'], loss='binary_crossentropy')
+        def wlogloss(yt, yp):
+            w = 1.3  # weight for false negative errors.
+
+            # Binary mask for locations of false negatives.
+            false_neg = K.clip(yt - K.cast((yp > self.config['output_threshold']), 'float'), 0, 1)
+
+            # Compute the standard log loss error at each location.
+            eps = K.epsilon()
+            errs = -((yt * K.log(yp + eps)) + ((1 - yt) * K.log(1 - yp + eps)))
+
+            # Subtract the error for all false negatives. T
+            # Then add the error back multiplied by the weight.
+            errs = (errs - (errs * false_neg)) + (errs * false_neg * w)
+
+            return K.mean(errs)
+
+        self.net.compile(optimizer=Adam(1e-3), metrics=[F2, meanyp, meanyt], loss='binary_crossentropy')
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
@@ -168,24 +204,24 @@ class Godard(object):
                                  self.config['trn_transform'])
         gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val, False)
 
-        def lrsched(epoch):
-            if epoch < 15:
-                return 1e-3
-            elif epoch < 23:
-                return 1e-4
-            else:
-                return 1e-5
+        # def lrsched(epoch):
+        #     if epoch < 15:
+        #         return 1e-3
+        #     elif epoch < 23:
+        #         return 1e-4
+        #     else:
+        #         return 1e-5
 
         cb = [
             HistoryPlot('%s/history.png' % self.cpdir),
             SamplePlot(gen_trn, '%s/samples.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/weights_val_acc.hdf5' % self.cpdir, monitor='val_acc', verbose=1,
-                            save_best_only=True, mode='max', save_weights_only=True),
-            ModelCheckpoint('%s/weights_val_loss.hdf5' % self.cpdir, monitor='val_loss', verbose=1,
-                            save_best_only=True, mode='min', save_weights_only=True),
-            EarlyStopping(monitor='val_loss', patience=3, verbose=1, mode='min'),
-            LearningRateScheduler(lrsched)
+            ModelCheckpoint('%s/weights_val_F2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
+                            save_best_only=True, mode='max'),
+            EarlyStopping(monitor='val_F2', patience=3, verbose=1, mode='max'),
+            ReduceLROnPlateau(monitor='val_F2', factor=0.1, patience=5, min_lr=1e-5, epsilon=1e-2, verbose=1),
+            # LearningRateScheduler(lrsched)
+
         ]
 
         # Steps should run through the full training / validation set per epoch.
@@ -193,7 +229,8 @@ class Godard(object):
         nb_steps_val = ceil(len(imgs_idxs_val) * 1. / self.config['batch_size_trn'])
 
         self.net.fit_generator(gen_trn, steps_per_epoch=nb_steps_trn, epochs=self.config['trn_nb_epochs'],
-                               verbose=1, callbacks=cb, workers=3, pickle_safe=True, max_q_size=100,
+                               verbose=1, callbacks=cb,
+                               workers=3, pickle_safe=True,
                                validation_data=gen_val, validation_steps=nb_steps_val)
 
     def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, transform=False, rng=np.random):
@@ -227,11 +264,7 @@ class Godard(object):
 
     def predict(self, img_batch):
         tags_pred = self.net.predict(img_batch)
-        # Alternative thresholds from https://goo.gl/hWfj8c.
-        # godard_thresh_vals = [0.245, 0.1375, 0.2225, 0.19, 0.0475, 0.2375, 0.12,
-        #                       0.0875, 0.265, 0.2175, 0.1925, 0.1625, 0.2625, 0.21, 0.14, 0.085, 0.205]
-        godard_thresh_vals = np.ones((17,)) * 0.2
-        tags_pred = (tags_pred > godard_thresh_vals).astype(np.uint8)
+        tags_pred = (tags_pred > self.config['output_threshold']).astype(np.uint8)
         return tags_pred
 
 if __name__ == "__main__":
