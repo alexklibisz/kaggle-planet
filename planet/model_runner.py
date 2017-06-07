@@ -33,6 +33,11 @@ def model_runner(model):
     parser_train.set_defaults(which='train')
     parser_train.add_argument('-w', '--weights', help='network weights')
 
+    # Optimizing.
+    parser_train = sub.add_parser('optimize', help='optimizing')
+    parser_train.set_defaults(which='optimize')
+    parser_train.add_argument('-w', '--weights', help='network weights')
+
     # Prediction / submission.
     parser_predict = sub.add_parser('predict', help='make predictions')
     parser_predict.set_defaults(which='predict')
@@ -40,7 +45,7 @@ def model_runner(model):
     parser_predict.add_argument('-w', '--weights', help='network weights', required=True)
 
     args = vars(parser.parse_args())
-    assert args['which'] in ['train', 'predict']
+    assert args['which'] in ['train', 'predict', 'optimize']
 
     # Select the GPU.
     gpu_selection(args['gpu'], 0.90)
@@ -89,6 +94,9 @@ def model_runner(model):
             # Progress...
             logger.info('%d/%d F2 running = %.2lf, F2 batch = %.2lf' %
                         (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
+
+    elif args['which'] == 'optimize':
+        model.optimize()
 
     elif args['which'] == 'predict' and args['dataset'] == 'test':
         df = pd.read_csv(model.config['tst_imgs_csv'])

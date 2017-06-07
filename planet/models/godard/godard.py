@@ -14,6 +14,9 @@ from keras.losses import kullback_leibler_divergence as KLD
 from keras.losses import binary_crossentropy
 from keras.applications import resnet50
 from math import ceil
+from moe.easy_interface.experiment import Experiment
+from moe.easy_interface.simple_endpoint import gp_next_points
+from moe.optimal_learning.python.data_containers import SamplePoint
 from os import path, mkdir, listdir
 from PIL import Image
 from skimage.transform import resize
@@ -213,7 +216,7 @@ class Godard(object):
                 img_idx = next(_imgs_idxs)
                 img = self.img_path_to_img(imgs_paths[img_idx])
                 if transform:
-                    img = random_transforms(img, nb_min=0, nb_max=4)
+                    img = random_transforms(img, nb_min=0, nb_max=5)
                 imgs_batch[batch_idx] = img
                 tags_batch[batch_idx] = tagset_to_ints(tag_sets[img_idx])
 
@@ -222,18 +225,55 @@ class Godard(object):
     def img_path_to_img(self, img_path):
         img = Image.open(img_path).convert('RGB')
         img.thumbnail(self.config['input_shape'][:2])
-        img = np.asarray(img, dtype=np.float32) / 255.
+        img = np.asarray(img, dtype=np.float32) / 255
         return img
 
-    def predict(self, img_batch):
+    def predict(self, img_batch, thresholds=None):
+        if thresholds is None:
+            thresholds = np.ones((17,)) * self.config['sigmoid_threshold']
         tags_pred = self.net.predict(img_batch)
         # Alternative thresholds from https://goo.gl/hWfj8c.
         # godard_thresh_vals = [0.245, 0.1375, 0.2225, 0.19, 0.0475, 0.2375, 0.12,
         #                       0.0875, 0.265, 0.2175, 0.1925, 0.1625, 0.2625, 0.21, 0.14, 0.085, 0.205]
-        godard_thresh_vals = np.ones((17,)) * 0.2
-        tags_pred = (tags_pred > godard_thresh_vals).astype(np.uint8)
+        tags_pred = (tags_pred > thresholds).astype(np.uint8)
         return tags_pred
+
+    def optimize(self):
+        df = pd.read_csv(imgs_csv)
+        imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
+        tag_sets = [tagset_to_ints(set(t.strip().split(' '))) for t in df['tags'].values]
+
+        imgs_batch = np.zeros([self.config['batch_size_tst'], ] + self.config['input_shape'])
+
+        exp = Experiment([[0,1]] *  len(self.config[output_shape][0]))
+
+        numTests = 20
+        for i in range(numTests):
+            next_thresholds_to_sample = gp_next_points(exp)[0]
+            F2_scores = get_f2_scores(imgs_paths, tag_sets, imgs_batch, next_thresholds_to_sample)
+            mean = np.mean(F2_scores)
+            var = np.var(F2_scores)
+            logger.info('%d/%d Thresholds are [%s]' % (i, numTests, ', '.join([str(x) for x in l])))
+            logger.info('    F2 mean = %.2lf, F2 var = %.2lf' %
+                        (mean, var))
+            exp.historical_data.append_sample_points([SamplePoint(next_thresholds_to_sample, 
+                                                      mean, var)])
+        
+
+    def get_f2_scores(self, imgs_paths, tags_true, imgs_batch, thresholds):
+        batch_size = len(imgs_batch)
+        for idx in range(0, len(imgs_paths), batch_size):
+            for _, img_path in imgs_paths[ids:idx + batch_size]:
+                imgs_batch[_] = self.img_path_to_img(img_path)
+
+            # Make predictions, compute F2 and store it.
+            tags_pred = self.predict(imgs_batch, thresholds)
+            for tt, tp in zip(tags_true[ids:idx + batch_size], tags_pred):
+                F2_scores.append(bool_F2(tt, tp))
+        return F2_scores
+
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
     model_runner(Godard())
+
