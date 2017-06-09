@@ -4,6 +4,7 @@ import numpy as np
 np.random.seed(317)
 
 from glob import glob
+from hyperopt import hp
 from itertools import cycle
 from keras.optimizers import Adam
 from keras.models import Model
@@ -14,9 +15,6 @@ from keras.losses import kullback_leibler_divergence as KLD
 from keras.losses import binary_crossentropy
 from keras.applications import resnet50
 from math import ceil
-from moe.easy_interface.experiment import Experiment
-from moe.easy_interface.simple_endpoint import gp_next_points
-from moe.optimal_learning.python.data_containers import SamplePoint
 from os import path, mkdir, listdir
 from PIL import Image
 from skimage.transform import resize
@@ -30,7 +28,7 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_ints, onehot_to_taglist, TAGS, onehot_F2, random_transforms
+from planet.utils.data_utils import tagset_to_ints, bool_F2, onehot_to_taglist, TAGS, onehot_F2, random_transforms
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
@@ -231,6 +229,8 @@ class Godard(object):
     def predict(self, img_batch, thresholds=None):
         if thresholds is None:
             thresholds = np.ones((17,)) * self.config['sigmoid_threshold']
+            # thresholds = np.ones((17,)) * [0.3949744842738293, 0.35646670896414034, 0.2354632378506592, 0.21900141790417665, 0.09663219418724556, 0.16309886126905748, 0.09862582812410145, 0.40505818388873943, 0.29467840611694573, 0.5340765231021278, 0.44163066996551353, 0.17753985846873613, 0.27459307412361633, 0.24140090011869653, 0.05191553521314547, 0.052724892922606015, 0.4036503445039251]
+
         tags_pred = self.net.predict(img_batch)
         # Alternative thresholds from https://goo.gl/hWfj8c.
         # godard_thresh_vals = [0.245, 0.1375, 0.2225, 0.19, 0.0475, 0.2375, 0.12,
@@ -239,37 +239,41 @@ class Godard(object):
         return tags_pred
 
     def optimize(self):
-        df = pd.read_csv(imgs_csv)
-        imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
+        df = pd.read_csv(self.config['trn_imgs_csv'])
+        imgs_paths = ['%s/%s.jpg' % (self.config['trn_imgs_dir'], n) for n in df['image_name'].values]
         tag_sets = [tagset_to_ints(set(t.strip().split(' '))) for t in df['tags'].values]
 
         imgs_batch = np.zeros([self.config['batch_size_tst'], ] + self.config['input_shape'])
 
-        exp = Experiment([[0,1]] *  len(self.config[output_shape][0]))
+        space = [hp.uniform(str(i), 0, 1) for i in range(self.config['output_shape'][0])]
 
-        numTests = 20
-        for i in range(numTests):
-            next_thresholds_to_sample = gp_next_points(exp)[0]
-            F2_scores = get_f2_scores(imgs_paths, tag_sets, imgs_batch, next_thresholds_to_sample)
-            mean = np.mean(F2_scores)
-            var = np.var(F2_scores)
-            logger.info('%d/%d Thresholds are [%s]' % (i, numTests, ', '.join([str(x) for x in l])))
-            logger.info('    F2 mean = %.2lf, F2 var = %.2lf' %
-                        (mean, var))
-            exp.historical_data.append_sample_points([SamplePoint(next_thresholds_to_sample, 
-                                                      mean, var)])
-        
+        def objective(thresholds):
+            scores = self.get_f2_scores(imgs_paths, tag_sets, imgs_batch, thresholds)
+            return 1 - np.mean(scores)
+
+        # minimize the objective over the space
+        from hyperopt import fmin, tpe, space_eval
+        best = fmin(objective, space, algo=tpe.suggest, max_evals=2)
+
+        print(best)
+        print(space_eval(space, best))
 
     def get_f2_scores(self, imgs_paths, tags_true, imgs_batch, thresholds):
         batch_size = len(imgs_batch)
+        F2_scores = []
         for idx in range(0, len(imgs_paths), batch_size):
-            for _, img_path in imgs_paths[ids:idx + batch_size]:
+            for _, img_path in enumerate(imgs_paths[idx:idx + batch_size]):
                 imgs_batch[_] = self.img_path_to_img(img_path)
 
             # Make predictions, compute F2 and store it.
             tags_pred = self.predict(imgs_batch, thresholds)
-            for tt, tp in zip(tags_true[ids:idx + batch_size], tags_pred):
+            for tt, tp in zip(tags_true[idx:idx + batch_size], tags_pred):
                 F2_scores.append(bool_F2(tt, tp))
+
+            # Progress...
+            print('%d/%d F2 running = %.2lf, F2 batch = %.2lf' %
+                        (idx, len(imgs_paths), np.mean(F2_scores), np.mean(F2_scores[idx:])))
+        print(thresholds)
         return F2_scores
 
 
