@@ -253,7 +253,7 @@ class Godard(object):
 
         # minimize the objective over the space
         from hyperopt import fmin, tpe, space_eval
-        best = fmin(objective, space, algo=tpe.suggest, max_evals=2)
+        best = fmin(objective, space, algo=tpe.suggest, max_evals=300)
 
         print(best)
         print(space_eval(space, best))
