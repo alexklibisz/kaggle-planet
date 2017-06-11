@@ -95,6 +95,7 @@ def model_runner(model):
             logger.info('%d/%d F2 running = %.2lf, F2 batch = %.2lf' %
                         (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
 
+        logger.info('F2 final = %lf' % np.mean(F2_scores))
     elif args['which'] == 'optimize':
         model.optimize()
 
