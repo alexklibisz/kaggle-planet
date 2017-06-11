@@ -4,7 +4,7 @@ import numpy as np
 np.random.seed(317)
 
 from glob import glob
-from hyperopt import hp
+from hyperopt import hp, fmin, tpe, space_eval
 from itertools import cycle
 from keras.optimizers import Adam
 from keras.models import Model
@@ -86,7 +86,7 @@ class Godard(object):
             'input_shape': [96, 96, 3],
             'output_shape': [17],
             'sigmoid_threshold': 0.2,
-            'batch_size_tst': 1200,
+            'batch_size_tst': 2400,
             'batch_size_trn': 128,
             'trn_nb_epochs': 30,
             'trn_transform': True,
@@ -95,7 +95,8 @@ class Godard(object):
             'tst_imgs_csv': 'data/sample_submission_v2.csv',
             'tst_imgs_dir': 'data/test-jpg',
             'trn_prop_trn': 0.8,
-            'trn_prop_val': 0.2
+            'trn_prop_val': 0.2,
+            'optimize_individually': True
         }
 
         self.checkpoint_name = checkpoint_name
@@ -245,22 +246,34 @@ class Godard(object):
 
         imgs_batch = np.zeros([self.config['batch_size_tst'], ] + self.config['input_shape'])
 
-        space = [hp.uniform(str(i), 0, 1) for i in range(self.config['output_shape'][0])]
+        if self.config['optimize_individually']:
+            thresholds = [0.2] * self.config['output_shape'][0]
+            thresholds = [0.2057822534120738, 0.17904424176966482, 0.16173641494347635, 0.17749436555197307, 0.1718912592676496, 0.35533438982531207, 0.1267769380503393, 0.1484117630813867, 0.2545285746778627, 0.20573219907959894, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+            for i in range(10, len(thresholds)):
+                def objective(threshold):
+                    thresholds[i] = threshold
+                    scores = self.get_f2_scores(imgs_paths, tag_sets, imgs_batch, thresholds)
+                    return -np.mean(scores)
+                space = hp.uniform(str(i), 0, 1)
 
-        def objective(thresholds):
-            scores = self.get_f2_scores(imgs_paths, tag_sets, imgs_batch, thresholds)
-            return 1 - np.mean(scores)
-
-        # minimize the objective over the space
-        from hyperopt import fmin, tpe, space_eval
-        best = fmin(objective, space, algo=tpe.suggest, max_evals=300)
-
-        print(best)
-        print(space_eval(space, best))
+                # maximize F2 by optimizing this threshold
+                thresholds[i] = fmin(objective, space, algo=tpe.suggest, max_evals=10)[str(i)]
+                print(i, thresholds)
+            print(thresholds)
+        else:
+            space = [hp.uniform(str(i), 0, 1) for i in range(self.config['output_shape'][0])]
+            def objective(thresholds):
+                scores = self.get_f2_scores(imgs_paths, tag_sets, imgs_batch, thresholds)
+                return -np.mean(scores)
+            # maximize F2 by optimizing all thresholds
+            best = fmin(objective, space, algo=tpe.suggest, max_evals=200)
+            print(best)
+            print(space_eval(space, best))
 
     def get_f2_scores(self, imgs_paths, tags_true, imgs_batch, thresholds):
         batch_size = len(imgs_batch)
         F2_scores = []
+        print(thresholds)
         for idx in range(0, len(imgs_paths), batch_size):
             for _, img_path in enumerate(imgs_paths[idx:idx + batch_size]):
                 imgs_batch[_] = self.img_path_to_img(img_path)
@@ -271,9 +284,8 @@ class Godard(object):
                 F2_scores.append(bool_F2(tt, tp))
 
             # Progress...
-            print('%d/%d F2 running = %.2lf, F2 batch = %.2lf' %
+            print('%d/%d F2 running = %lf, F2 batch = %lf' %
                         (idx, len(imgs_paths), np.mean(F2_scores), np.mean(F2_scores[idx:])))
-        print(thresholds)
         return F2_scores
 
 
