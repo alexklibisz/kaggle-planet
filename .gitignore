@@ -2,5 +2,5 @@ checkpoints/*
 data/*
 **/*.pyc
 **/__pycache__
-
+*.log
 !*/.keep

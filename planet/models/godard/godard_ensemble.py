@@ -38,7 +38,7 @@ COLORS = ['red', 'yellow', 'blue']
 def train_nets(nets, tags, weight_paths, verbose, config, cpdir, gpu):
 
     # Generator defined alongside training code.
-    def batch_gen(paths_pos, paths_neg, nb_steps):
+    def batch_gen(paths_pos, paths_neg, nb_steps, augment=False):
 
         while True:
 
@@ -61,8 +61,8 @@ def train_nets(nets, tags, weight_paths, verbose, config, cpdir, gpu):
                     img.thumbnail(config['input_shape'])
                     imgs_batch[bidx] = np.asarray(img) / 255.
                     tags_batch[bidx] = tag
-                    if config['trn_augment']:
-                        imgs_batch[bidx] = random_transforms(imgs_batch[bidx], nb_min=0, nb_max=5)
+                    if augment:
+                        imgs_batch[bidx] = random_transforms(imgs_batch[bidx], nb_min=0, nb_max=10)
 
                 yield imgs_batch, tags_batch
 
@@ -72,7 +72,7 @@ def train_nets(nets, tags, weight_paths, verbose, config, cpdir, gpu):
     df = pd.read_csv(config['trn_imgs_csv'])
     color = COLORS[int(gpu) % len(COLORS)]
     np.random.seed(317)
-    tf.set_random_seed(np.random.randint(0, 10000))
+    tf.set_random_seed(317)
 
     for idx, (net, tag, weight_path) in enumerate(zip(nets, tags, weight_paths)):
 
@@ -101,7 +101,7 @@ def train_nets(nets, tags, weight_paths, verbose, config, cpdir, gpu):
         nb_steps_val = ceil(len(paths_pos_val) * 2 / config['batch_size_trn'])
 
         # Define generators.
-        gen_trn = batch_gen(paths_pos_trn, paths_neg_trn, nb_steps_trn)
+        gen_trn = batch_gen(paths_pos_trn, paths_neg_trn, nb_steps_trn, config['trn_augment'])
         gen_val = batch_gen(paths_pos_val, paths_neg_val, nb_steps_val)
 
         mult = 2 if config['trn_augment'] else 1
@@ -109,9 +109,9 @@ def train_nets(nets, tags, weight_paths, verbose, config, cpdir, gpu):
         cb = [
             HistoryPlot('%s/history_%s.png' % (cpdir, tag)),
             CSVLogger('%s/history_%s.csv' % (cpdir, tag)),
-            ModelCheckpoint(weight_path, monitor='val_F2', verbose=1, save_best_only=True, mode='max'),
-            EarlyStopping(monitor='val_F2', patience=int(10 * mult), verbose=1, mode='max'),
-            ReduceLROnPlateau(monitor='val_F2', mode='max', factor=0.5,
+            ModelCheckpoint(weight_path, monitor='F2adj', verbose=1, save_best_only=True, mode='max'),
+            EarlyStopping(monitor='F2adj', patience=int(10 * mult), verbose=1, mode='max'),
+            ReduceLROnPlateau(monitor='F2adj', mode='max', factor=0.5,
                               min_lr=1e-4, patience=int(3 * mult), cooldown=1, verbose=1),
             TerminateOnNaN()
         ]
@@ -130,9 +130,10 @@ def create_net(config):
 
     inputs = Input(shape=config['input_shape'])
 
-    x = BatchNormalization(axis=3)(inputs)
     ki = 'he_uniform'
     kreg = l2(1e-2)
+
+    x = BatchNormalization(axis=3)(inputs)
 
     x = Conv2D(32, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = Conv2D(32, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
@@ -142,20 +143,16 @@ def create_net(config):
     x = Conv2D(64, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = Conv2D(64, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = MaxPooling2D(pool_size=2)(x)
-    x = Dropout(0.25)(x)
+    x = Dropout(0.3)(x)
 
     x = Conv2D(128, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = Conv2D(128, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
-    x = MaxPooling2D(pool_size=2)(x)
-    x = Dropout(0.25)(x)
-
-    x = Conv2D(256, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
-    x = Conv2D(256, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = MaxPooling2D(pool_size=2)(x)
     x = Dropout(0.5)(x)
 
     x = Flatten()(x)
-    x = Dense(512, activation='relu')(x)
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(0.1)(x)
     x = Dense(2, activation='softmax')(x)
     x = Lambda(lambda x: x[:, 1:])(x)
 
@@ -171,13 +168,16 @@ def create_net(config):
         b = 2.0
         return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-    def ypmean(yt, yp):
+    def ypm(yt, yp):
         return K.mean(yp)
 
-    def ytmean(yt, yp):
+    def ytm(yt, yp):
         return K.mean(yt)
 
-    net.compile(optimizer=Adam(0.0005), metrics=[F2, 'accuracy', ytmean, ypmean], loss='binary_crossentropy')
+    def F2adj(yt, yp):
+        return F2(yt, yp) * (1 - K.abs(K.mean(yp) - K.mean(yt)))
+
+    net.compile(optimizer=Adam(0.0005), metrics=[F2, F2adj, 'accuracy', ytm, ypm], loss='binary_crossentropy')
     return net
 
 
