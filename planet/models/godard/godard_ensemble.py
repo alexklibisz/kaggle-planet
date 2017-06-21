@@ -109,9 +109,9 @@ def train_nets(nets, tags, weight_paths, verbose, config, cpdir, gpu):
         cb = [
             HistoryPlot('%s/history_%s.png' % (cpdir, tag)),
             CSVLogger('%s/history_%s.csv' % (cpdir, tag)),
-            ModelCheckpoint(weight_path, monitor='F2adj', verbose=1, save_best_only=True, mode='max'),
-            EarlyStopping(monitor='F2adj', patience=int(10 * mult), verbose=1, mode='max'),
-            ReduceLROnPlateau(monitor='F2adj', mode='max', factor=0.5,
+            ModelCheckpoint(weight_path, monitor='val_F2', verbose=1, save_best_only=True, mode='max'),
+            EarlyStopping(monitor='val_F2', patience=int(10 * mult), verbose=1, mode='max'),
+            ReduceLROnPlateau(monitor='val_F2', mode='max', factor=0.5,
                               min_lr=1e-4, patience=int(3 * mult), cooldown=1, verbose=1),
             TerminateOnNaN()
         ]
@@ -130,7 +130,7 @@ def create_net(config):
 
     inputs = Input(shape=config['input_shape'])
 
-    ki = 'he_uniform'
+    ki = 'glorot_normal'
     kreg = l2(1e-2)
 
     x = BatchNormalization(axis=3)(inputs)
@@ -138,21 +138,21 @@ def create_net(config):
     x = Conv2D(32, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = Conv2D(32, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = MaxPooling2D(pool_size=2)(x)
-    x = Dropout(0.1)(x)
+    # x = Dropout(0.1)(x)
 
     x = Conv2D(64, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = Conv2D(64, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = MaxPooling2D(pool_size=2)(x)
-    x = Dropout(0.3)(x)
+    # x = Dropout(0.3)(x)
 
     x = Conv2D(128, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = Conv2D(128, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = MaxPooling2D(pool_size=2)(x)
-    x = Dropout(0.5)(x)
+    # x = Dropout(0.5)(x)
 
     x = Flatten()(x)
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.1)(x)
+
+    x = Dense(512, activation='relu')(x)
     x = Dense(2, activation='softmax')(x)
     x = Lambda(lambda x: x[:, 1:])(x)
 
@@ -174,10 +174,7 @@ def create_net(config):
     def ytm(yt, yp):
         return K.mean(yt)
 
-    def F2adj(yt, yp):
-        return F2(yt, yp) * (1 - K.abs(K.mean(yp) - K.mean(yt)))
-
-    net.compile(optimizer=Adam(0.0005), metrics=[F2, F2adj, 'accuracy', ytm, ypm], loss='binary_crossentropy')
+    net.compile(optimizer=Adam(0.0005), metrics=[F2, 'accuracy', ytm, ypm], loss='binary_crossentropy')
     return net
 
 
@@ -190,7 +187,7 @@ class GodardEnsemble(object):
             'output_shape': [1, ],
             'batch_size_tst': 2400,
             'batch_size_trn': 32,
-            'trn_nb_epochs': 50,
+            'trn_nb_epochs': 15,
             'trn_augment': True,
             'img_ext': 'jpg',
             'trn_imgs_csv': 'data/train_v2.csv',
