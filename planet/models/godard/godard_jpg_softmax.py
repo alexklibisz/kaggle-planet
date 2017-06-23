@@ -1,7 +1,9 @@
 # Godard
 
 import numpy as np
-np.random.seed(7606)
+import tensorflow as tf
+np.random.seed(317)
+tf.set_random_seed(318)
 
 from glob import glob
 from itertools import cycle
@@ -10,9 +12,8 @@ from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LearningRateScheduler
-from keras.losses import kullback_leibler_divergence as KLD
-from keras.losses import binary_crossentropy
-from keras.applications import resnet50
+from keras.layers.advanced_activations import PReLU
+from keras.regularizers import l2
 from math import ceil
 from os import path, mkdir, listdir
 from PIL import Image
@@ -33,51 +34,6 @@ from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
 
-class SamplePlot(Callback):
-
-    def __init__(self, batch_gen, file_name):
-        super(Callback, self).__init__()
-        self.logs = {}
-        self.batch_gen = batch_gen
-        self.file_name = file_name
-
-    def on_train_begin(self, logs={}):
-        self.logs = {}
-
-    def on_epoch_end(self, epoch, logs={}):
-
-        import matplotlib
-        matplotlib.use('agg')
-        import matplotlib.pyplot as plt
-
-        imgs_batch, tags_batch = next(self.batch_gen)
-        tags_pred = self.model.predict(imgs_batch)
-
-        nrows, ncols = min(len(imgs_batch), 10), 2
-        fig, _ = plt.subplots(nrows, ncols, figsize=(8, nrows * 2.5))
-        scatter_x = np.arange(len(TAGS))
-        scatter_xticks = [t[:5] for t in TAGS]
-
-        for idx, (img, tt, tp) in enumerate(zip(imgs_batch, tags_batch, tags_pred)):
-            if idx >= nrows:
-                break
-            ax1, ax2 = fig.axes[idx * 2 + 0], fig.axes[idx * 2 + 1]
-            ax1.axis('off')
-            ax1.imshow(img[:, :, :3])
-            tt, tp = tt.round().astype(np.float32), tp.round().astype(np.float32)
-            ax2.scatter(scatter_x, tp - tt, marker='x')
-            ax2.set_xticks(scatter_x)
-            ax2.set_xticklabels(scatter_xticks, rotation='vertical')
-            ax2.set_ylim(-1.1, 1.1)
-            ax2.set_yticks([-1, 0, 1])
-            ax2.set_yticklabels(['FN', 'OK', 'FP'])
-
-        plt.subplots_adjust(hspace=0.5)
-        plt.suptitle('Epoch %d' % (epoch + 1))
-        plt.savefig(self.file_name)
-        plt.close()
-
-
 class Godard(object):
 
     def __init__(self, checkpoint_name='godard_jpg_softmax'):
@@ -85,10 +41,9 @@ class Godard(object):
         self.config = {
             'input_shape': [64, 64, 3],
             'output_shape': [17],
-            'output_threshold': 0.5,
             'batch_size_tst': 500,
-            'batch_size_trn': 128,
-            'trn_nb_epochs': 30,
+            'batch_size_trn': 64,
+            'trn_nb_epochs': 60,
             'trn_transform': True,
             'trn_imgs_csv': 'data/train_v2.csv',
             'trn_imgs_dir': 'data/train-jpg',
@@ -109,90 +64,90 @@ class Godard(object):
             mkdir(cpdir)
         return cpdir
 
-    def create_net(self):
+    def create_net(self, weights_path=None):
 
         inputs = Input(shape=self.config['input_shape'])
 
-        x = BatchNormalization()(inputs)
+        x = BatchNormalization(axis=3)(inputs)
 
-        x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
-        x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
-        x = MaxPooling2D(pool_size=2)(x)
-        x = Dropout(0.2)(x)
+        def conv_block(nb_filters, prop_dropout, x):
+            ki = 'he_uniform'
+            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
+            x = PReLU()(x)
+            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
+            x = PReLU()(x)
+            x = MaxPooling2D(pool_size=2)(x)
+            x = Dropout(prop_dropout)(x)
+            return x
 
-        x = Conv2D(64, (3, 3), padding='same', activation='relu')(x)
-        x = Conv2D(64, (3, 3), padding='same', activation='relu')(x)
-        x = MaxPooling2D(pool_size=2)(x)
-        x = Dropout(0.2)(x)
-
-        x = Conv2D(128, (3, 3), padding='same', activation='relu')(x)
-        x = Conv2D(128, (3, 3), padding='same', activation='relu')(x)
-        x = MaxPooling2D(pool_size=2)(x)
-        x = Dropout(0.2)(x)
-
-        x = Conv2D(256, (3, 3), padding='same', activation='relu')(x)
-        x = Conv2D(256, (3, 3), padding='same', activation='relu')(x)
-        x = MaxPooling2D(pool_size=2)(x)
-        x = Dropout(0.2)(x)
+        x = conv_block(32, 0.1, x)
+        x = conv_block(64, 0.2, x)
+        x = conv_block(128, 0.3, x)
+        x = conv_block(256, 0.3, x)
+        x = conv_block(512, 0.3, x)
 
         x = Flatten()(x)
-
-        x = Dense(1024, activation='relu')(x)
-        x = BatchNormalization()(x)
-        x = Dropout(0.2)(x)
-
-        x = Dense(512, activation='relu')(x)
-        x = BatchNormalization()(x)
+        x = Dense(1024)(x)
+        x = PReLU()(x)
         x = Dropout(0.2)(x)
         shared_out = x
 
         # Individual softmax classifier for each class.
         classifiers = []
         for _ in range(17):
-            x = Dense(2, activation='softmax')(shared_out)
+            x = Dense(256)(shared_out)
+            x = PReLU()(x)
+            x = Dense(2, activation='softmax')(x)
             classifiers.append(x)
 
         x = concatenate(classifiers, axis=-1)
-        x = Reshape((17, 2), name='labels')(x)
-        tags = Lambda(lambda x: x[:, :, 1])(x)
+        x = Reshape((17, 2))(x)
+        x = Lambda(lambda x: x[:, :, 1])(x)
 
-        self.net = Model(inputs=inputs, outputs=tags)
+        self.net = Model(inputs=inputs, outputs=x)
 
-        def meanyt(yt, yp):
+        def myt(yt, yp):
             return K.mean(yt)
 
-        def meanyp(yt, yp):
+        def myp(yt, yp):
             return K.mean(yp)
 
-        def F2(yt, yp):
-            yp = K.cast(yp > self.config['output_threshold'], 'float')
+        def prec(yt, yp):
+            yp = K.round(yp)
             tp = K.sum(yt * yp)
             fp = K.sum(K.clip(yp - yt, 0, 1))
+            return tp / (tp + fp + K.epsilon())
+
+        def reca(yt, yp):
+            yp = K.round(yp)
+            tp = K.sum(yt * yp)
             fn = K.sum(K.clip(yt - yp, 0, 1))
-            p = tp / (tp + fp)
-            r = tp / (tp + fn)
+            return tp / (tp + fn + K.epsilon())
+
+        def F2(yt, yp):
+            p = prec(yt, yp)
+            r = reca(yt, yp)
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        def wlogloss(yt, yp):
-            w = 1.3  # weight for false negative errors.
+        def logloss(yt, yp):
+            wfn = 8.  # Weight false negative errors.
+            wfp = 1.  # Weight false positive errors.
+            wmult = (yt * wfn) + (K.abs(yt - 1) * wfp)
+            errors = yt * K.log(yp + 1e-7) + ((1 - yt) * K.log(1 - yp + 1e-7))
+            return -1 * K.mean(errors * wmult)
 
-            # Binary mask for locations of false negatives.
-            false_neg = K.clip(yt - K.cast((yp > self.config['output_threshold']), 'float'), 0, 1)
+        def acc(yt, yp):
+            nbwrong = K.sum(K.abs(yt - K.round(yp)))
+            size = K.sum(K.ones_like(yt))
+            return (size - nbwrong) / size
 
-            # Compute the standard log loss error at each location.
-            eps = K.epsilon()
-            errs = -((yt * K.log(yp + eps)) + ((1 - yt) * K.log(1 - yp + eps)))
-
-            # Subtract the error for all false negatives. T
-            # Then add the error back multiplied by the weight.
-            errs = (errs - (errs * false_neg)) + (errs * false_neg * w)
-
-            return K.mean(errs)
-
-        self.net.compile(optimizer=Adam(1e-3), metrics=[F2, meanyp, meanyt], loss='binary_crossentropy')
+        self.net.compile(optimizer=Adam(0.0015), metrics=[F2, prec, reca, myt, myp, acc], loss=logloss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
+
+        if weights_path is not None:
+            self.net.load_weights(weights_path)
 
     def train(self, rng=np.random):
 
@@ -204,27 +159,16 @@ class Godard(object):
                                  self.config['trn_transform'])
         gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val, False)
 
-        # def lrsched(epoch):
-        #     if epoch < 15:
-        #         return 1e-3
-        #     elif epoch < 23:
-        #         return 1e-4
-        #     else:
-        #         return 1e-5
-
         cb = [
             HistoryPlot('%s/history.png' % self.cpdir),
-            SamplePlot(gen_trn, '%s/samples.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/weights_val_F2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
-            EarlyStopping(monitor='val_F2', patience=3, verbose=1, mode='max'),
-            ReduceLROnPlateau(monitor='val_F2', factor=0.1, patience=5, min_lr=1e-5, epsilon=1e-2, verbose=1),
-            # LearningRateScheduler(lrsched)
-
+            ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=2,
+                              min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
+            EarlyStopping(monitor='val_F2', patience=30, verbose=1, mode='max')
         ]
 
-        # Steps should run through the full training / validation set per epoch.
         nb_steps_trn = ceil(len(imgs_idxs_trn) * 1. / self.config['batch_size_trn'])
         nb_steps_val = ceil(len(imgs_idxs_val) * 1. / self.config['batch_size_trn'])
 
@@ -233,7 +177,10 @@ class Godard(object):
                                workers=3, pickle_safe=True,
                                validation_data=gen_val, validation_steps=nb_steps_val)
 
-    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, transform=False, rng=np.random):
+    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, transform=False):
+
+        rng = np.random
+        nb_steps = ceil(len(imgs_idxs) * 1. / self.config['batch_size_trn'])
 
         # Read the CSV and extract image names and tags.
         df = pd.read_csv(imgs_csv)
@@ -242,19 +189,22 @@ class Godard(object):
 
         while True:
 
-            imgs_batch = np.zeros([self.config['batch_size_trn'], ] + self.config['input_shape'])
-            tags_batch = np.zeros([self.config['batch_size_trn'], ] + self.config['output_shape'])
+            # Shuffle all the given images and make one complete pass through them before re-shuffling.
             _imgs_idxs = cycle(rng.choice(imgs_idxs, len(imgs_idxs)))
+            for _ in range(nb_steps):
 
-            for batch_idx in range(self.config['batch_size_trn']):
-                img_idx = next(_imgs_idxs)
-                img = self.img_path_to_img(imgs_paths[img_idx])
-                if transform:
-                    img = random_transforms(img, nb_min=0, nb_max=4)
-                imgs_batch[batch_idx] = img
-                tags_batch[batch_idx] = tagset_to_ints(tag_sets[img_idx])
+                imgs_batch = np.zeros([self.config['batch_size_trn'], ] + self.config['input_shape'])
+                tags_batch = np.zeros([self.config['batch_size_trn'], ] + self.config['output_shape'])
 
-            yield imgs_batch, tags_batch
+                for batch_idx in range(self.config['batch_size_trn']):
+                    img_idx = next(_imgs_idxs)
+                    img = self.img_path_to_img(imgs_paths[img_idx])
+                    if transform:
+                        img = random_transforms(img, nb_min=0, nb_max=4)
+                    imgs_batch[batch_idx] = img
+                    tags_batch[batch_idx] = tagset_to_ints(tag_sets[img_idx])
+
+                yield imgs_batch, tags_batch
 
     def img_path_to_img(self, img_path):
         img = Image.open(img_path).convert('RGB')
