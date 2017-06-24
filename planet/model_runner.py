@@ -59,7 +59,7 @@ def model_runner(model):
         df = pd.read_csv(model.config['trn_imgs_csv'])
         F2_scores = []
 
-        # Reading images, making predictions in batches.
+        # Reading images, making predictions in batches, tracking F2 scores.
         for idx in range(0, df.shape[0], model.config['batch_size_tst']):
 
             # Read images, extract tags.

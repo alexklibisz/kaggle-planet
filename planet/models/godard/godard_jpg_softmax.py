@@ -41,14 +41,15 @@ class Godard(object):
         self.config = {
             'input_shape': [64, 64, 3],
             'output_shape': [17],
-            'batch_size_tst': 500,
+            'batch_size_tst': 1500,
             'batch_size_trn': 64,
-            'trn_nb_epochs': 60,
+            'trn_nb_epochs': 120,
             'trn_transform': True,
             'trn_imgs_csv': 'data/train_v2.csv',
             'trn_imgs_dir': 'data/train-jpg',
             'tst_imgs_csv': 'data/sample_submission_v2.csv',
             'tst_imgs_dir': 'data/test-jpg',
+            'extension': 'jpg',
             'trn_prop_trn': 0.8,
             'trn_prop_val': 0.2
         }
@@ -212,10 +213,17 @@ class Godard(object):
         img = np.asarray(img, dtype=np.float32) / 255.
         return img
 
-    def predict(self, img_batch):
-        tags_pred = self.net.predict(img_batch)
-        tags_pred = (tags_pred > self.config['output_threshold']).astype(np.uint8)
-        return tags_pred
+    def predict(self, imgs_names):
+
+        imgs_dir = self.config['trn_imgs_dir'] if 'train' in imgs_names[0] else self.config['tst_imgs_dir']
+        imgs_paths = ['%s/%s.%s' % (imgs_dir, name, self.config['extension']) for name in imgs_names]
+        shape = [len(imgs_names), ] + self.config['input_shape']
+        imgs_batch = np.zeros(shape, dtype=np.float32)
+
+        for bidx, img_path in enumerate(imgs_paths):
+            imgs_batch[bidx] = self.img_path_to_img(img_path)
+
+        return self.net.predict(imgs_batch).round().astype(np.uint8)
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
