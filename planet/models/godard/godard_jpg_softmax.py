@@ -66,11 +66,12 @@ class Godard(object):
 
     def create_net(self, weights_path=None):
 
+        logger = logging.getLogger(funcname())
+
         inputs = Input(shape=self.config['input_shape'])
 
         x = BatchNormalization(axis=3)(inputs)
 
-        conv_num = 0
         def conv_block(nb_filters, prop_dropout, x):
             ki = 'he_uniform'
             x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
@@ -98,7 +99,7 @@ class Godard(object):
         for _ in range(17):
             x = Dense(256)(shared_out)
             x = PReLU()(x)
-            x = Dense(2, activation='linear', name='output_%d'%_)(x)
+            x = Dense(2, activation='softmax', name='output_%d' % _)(x)
             classifiers.append(x)
 
         x = concatenate(classifiers, axis=-1)
@@ -167,13 +168,13 @@ class Godard(object):
             tcnt_metrics.append(tagcnt)
 
         self.net.compile(optimizer=Adam(0.0015),
-                         metrics=[F2, prec, reca] + tf2_metrics + tcnt_metrics,
+                         metrics=[F2, prec, reca, myt, myp] + tf2_metrics + tcnt_metrics,
                          loss=logloss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
         if weights_path is not None:
-            print('Loading weights from %s' % weights_path)
+            logger.info('Loading weights from %s' % weights_path)
             self.net.load_weights(weights_path)
 
     def train(self):
@@ -212,8 +213,8 @@ class Godard(object):
             EarlyStopping(monitor='val_F2', patience=30, verbose=1, mode='max')
         ]
 
-        nb_steps_trn = ceil(len(imgs_idxs_trn) * 1. / self.config['batch_size_trn'])
-        nb_steps_val = ceil(len(imgs_idxs_val) * 1. / self.config['batch_size_trn'])
+        nb_steps_trn = ceil(len(imgs_idxs_trn) / self.config['batch_size_trn'])
+        nb_steps_val = ceil(len(imgs_idxs_val) / self.config['batch_size_trn'])
 
         self.net.fit_generator(gen_trn, steps_per_epoch=nb_steps_trn, epochs=self.config['trn_nb_epochs'],
                                verbose=1, callbacks=cb,
@@ -222,12 +223,16 @@ class Godard(object):
 
     def batch_gen(self, imgs_csv, imgs_dir, img_idxs, transform=False, balanced=False):
 
+        # Helpers.
         rng = np.random
-        nb_steps = ceil(len(img_idxs) * 1. / self.config['batch_size_trn'])
+        shuffle = lambda x: rng.choice(x, len(x))
+
+        # Constants.
+        nb_steps = ceil(len(img_idxs) / self.config['batch_size_trn'])
         img_batch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
         tag_batch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
 
-        # Read the CSV and extract image names and tags.
+        # Read the CSV and extract image paths and tags.
         df = pd.read_csv(imgs_csv)
         img_pths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
         img_tags = [tagstr_to_ints(tstr) for tstr in df['tags'].values]
@@ -239,14 +244,17 @@ class Godard(object):
             for t in pos_tags:
                 tags_to_img_idxs[t].append(img_idx)
 
-        # Track the frequency of samples for each tag and sample from the least frequent
-        # for balanced sampling (when balanced = True).
-        tag_freq = np.zeros(len(TAGS), dtype=np.uint64)
+        # Convert to cycles for sequential sampling.
+        for i in range(len(TAGS)):
+            tags_to_img_idxs[i] = cycle(shuffle(tags_to_img_idxs[i]))
 
-        # Cycle over image indexes for consecutive sampling (when balanced = False).
+        # Cycle on image indexes for consecutive sampling (when balanced = False).
         img_idxs_cycle = cycle(img_idxs)
 
         while True:
+
+            # Shuffle order of tags for balanced sampling.
+            tag_idxs = cycle(shuffle(np.arange(len(TAGS))))
 
             for _ in range(nb_steps):
 
@@ -256,30 +264,24 @@ class Godard(object):
                 for batch_idx in range(self.config['batch_size_trn']):
 
                     if balanced:
-                        tag_idx = np.argmin(tag_freq)
-                        img_idx = rng.choice(tags_to_img_idxs[tag_idx])
-                        img = self.img_path_to_img(img_pths[img_idx])
-                        tags = img_tags[img_idx]
-                        tag_freq += tags
-                        assert tags[tag_idx] == 1.
+                        tag_idx = next(tag_idxs)
+                        img_idx = next(tags_to_img_idxs[tag_idx])
                     else:
                         img_idx = next(img_idxs_cycle)
-                        img = self.img_path_to_img(img_pths[img_idx])
-                        tags = img_tags[img_idx]
+
+                    imgs_batch[batch_idx] = self.img_path_to_img(img_pths[img_idx])
+                    tags_batch[batch_idx] = img_tags[img_idx]
 
                     if transform:
-                        img = random_transforms(img, nb_min=0, nb_max=4)
-
-                    imgs_batch[batch_idx] = img
-                    tags_batch[batch_idx] = tags
+                        imgs_batch[batch_idx] = random_transforms(imgs_batch[batch_idx], 0, 4)
 
                 yield imgs_batch, tags_batch
 
     def img_path_to_img(self, img_path):
         img = Image.open(img_path).convert('RGB')
         img.thumbnail(self.config['input_shape'][:2])
-        img = np.asarray(img, dtype=np.float32) / 255.
-        return img
+        img = np.asarray(img)
+        return img / 255.
 
     def predict(self, imgs_names):
 
@@ -296,7 +298,6 @@ class Godard(object):
     def visualize_activation(self):
 
         from matplotlib import pyplot as plt
-
         from vis.utils import utils
         from vis.visualization import visualize_activation, get_num_filters
 
@@ -307,7 +308,8 @@ class Godard(object):
             layer_idx = [idx for idx, layer in enumerate(self.net.layers) if layer.name == layer_name][0]
 
             print('Working on %s' % layer_name)
-            # Generate input image for each filter. Here `text` field is used to overlay `filter_value` on top of the image.
+            # Generate input image for each filter. Here `text` field is used to
+            # overlay `filter_value` on top of the image.
             for idx in [1, 1, 1]:
                 img = visualize_activation(self.net, layer_idx, filter_indices=idx, max_iter=500)
                 img = utils.draw_text(img, TAGS[i])

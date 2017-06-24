@@ -27,7 +27,7 @@ from scipy.misc import imread
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_ints, onehot_to_taglist, TAGS, onehot_F2, random_transforms
+from planet.utils.data_utils import tagstr_to_ints, onehot_to_taglist, TAGS, onehot_F2, random_transforms
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
@@ -154,8 +154,7 @@ class ResNet50_softmax(object):
         # Read the CSV and extract image names and tags.
         df = pd.read_csv(imgs_csv)
         imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
-        tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
-        tag_set_ints = [tagset_to_ints(ts) for ts in tag_sets]
+        tag_set_ints = [tagstr_to_ints(ts) for ts in df['tags'].values]
 
         img_batch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
         tag_batch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
