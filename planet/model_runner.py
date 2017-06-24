@@ -41,6 +41,11 @@ def model_runner(model):
     parser_train.set_defaults(which='optimize')
     parser_train.add_argument('-w', '--weights', help='network weights')
 
+    # Optimizing.
+    parser_train = sub.add_parser('visualize', help='optimizing')
+    parser_train.set_defaults(which='visualize')
+    parser_train.add_argument('-w', '--weights', help='network weights')
+
     # Prediction / submission.
     parser_predict = sub.add_parser('predict', help='make predictions')
     parser_predict.set_defaults(which='predict')
@@ -48,7 +53,7 @@ def model_runner(model):
     parser_predict.add_argument('-w', '--weights', help='network weights', required=True)
 
     args = vars(parser.parse_args())
-    assert args['which'] in ['train', 'predict', 'optimize']
+    assert args['which'] in ['train', 'predict', 'optimize', 'visualize']
 
     # Create network before loading weights or training.
     model.create_net(args['weights'])
@@ -86,6 +91,9 @@ def model_runner(model):
     # Experimental threshold optimization.
     elif args['which'] == 'optimize':
         model.optimize()
+
+    elif args['which'] == 'visualize':
+        model.visualize_activation()
 
     elif args['which'] == 'predict' and args['dataset'] == 'test':
         df = pd.read_csv(model.config['tst_imgs_csv'])

@@ -70,9 +70,10 @@ class Godard(object):
 
         x = BatchNormalization(axis=3)(inputs)
 
-        def conv_block(nb_filters, prop_dropout, x):
+        conv_num = 0
+        def conv_block(nb_filters, prop_dropout, name,x):
             ki = 'he_uniform'
-            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
+            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki, name=name)(x)
             x = PReLU()(x)
             x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
             x = PReLU()(x)
@@ -97,7 +98,7 @@ class Godard(object):
         for _ in range(17):
             x = Dense(256)(shared_out)
             x = PReLU()(x)
-            x = Dense(2, activation='softmax')(x)
+            x = Dense(2, activation='linear', name='output_%d'%_)(x)
             classifiers.append(x)
 
         x = concatenate(classifiers, axis=-1)
@@ -172,6 +173,7 @@ class Godard(object):
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
         if weights_path is not None:
+            print('Loading weights from %s' % weights_path)
             self.net.load_weights(weights_path)
 
     def train(self):
@@ -290,6 +292,33 @@ class Godard(object):
             imgs_batch[bidx] = self.img_path_to_img(img_path)
 
         return self.net.predict(imgs_batch).round().astype(np.uint8)
+
+    def visualize_activation(self):
+
+        from matplotlib import pyplot as plt
+
+        from vis.utils import utils
+        from vis.visualization import visualize_activation, get_num_filters
+
+        vis_images = []
+        for i in range(self.config['output_shape'][0]):
+            # The name of the layer we want to visualize
+            layer_name = 'output_%d' % i
+            layer_idx = [idx for idx, layer in enumerate(self.net.layers) if layer.name == layer_name][0]
+
+            print('Working on %s' % layer_name)
+            # Generate input image for each filter. Here `text` field is used to overlay `filter_value` on top of the image.
+            for idx in [1, 1, 1]:
+                img = visualize_activation(self.net, layer_idx, filter_indices=idx, max_iter=500)
+                img = utils.draw_text(img, TAGS[i])
+                vis_images.append(img)
+
+        # Generate stitched image palette with 8 cols.
+        stitched = utils.stitch_images(vis_images, cols=3)
+        plt.axis('off')
+        plt.imshow(stitched)
+        plt.title(self.checkpoint_name)
+        plt.show()
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
