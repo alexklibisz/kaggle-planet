@@ -17,7 +17,6 @@ from keras.regularizers import l2
 from math import ceil
 from os import path, mkdir, listdir
 from PIL import Image
-from skimage.transform import resize
 from time import time
 import argparse
 import logging
@@ -43,7 +42,7 @@ class Godard(object):
             'output_shape': [17],
             'batch_size_tst': 1500,
             'batch_size_trn': 64,
-            'trn_nb_epochs': 120,
+            'trn_nb_epochs': 300,
             'trn_transform': True,
             'trn_imgs_csv': 'data/train_v2.csv',
             'trn_imgs_dir': 'data/train-jpg',
@@ -143,15 +142,16 @@ class Godard(object):
             size = K.sum(K.ones_like(yt))
             return (size - nbwrong) / size
 
-        self.net.compile(optimizer=Adam(0.0015), metrics=[F2, prec, reca, myt, myp, acc], loss=logloss)
+        self.net.compile(optimizer=Adam(0.0015), metrics=[F2, prec, reca], loss=logloss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
         if weights_path is not None:
             self.net.load_weights(weights_path)
 
-    def train(self, rng=np.random):
+    def train(self):
 
+        rng = np.random
         imgs_idxs = np.arange(len(listdir(self.config['trn_imgs_dir'])))
         imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
         imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
@@ -165,7 +165,7 @@ class Godard(object):
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/weights_val_F2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
-            ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=2,
+            ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=10,
                               min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
             EarlyStopping(monitor='val_F2', patience=30, verbose=1, mode='max')
         ]
@@ -187,6 +187,10 @@ class Godard(object):
         df = pd.read_csv(imgs_csv)
         imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
         tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
+        tag_set_ints = [tagset_to_ints(ts) for ts in tag_sets]
+
+        img_batch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
+        tag_batch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
 
         while True:
 
@@ -194,8 +198,8 @@ class Godard(object):
             _imgs_idxs = cycle(rng.choice(imgs_idxs, len(imgs_idxs)))
             for _ in range(nb_steps):
 
-                imgs_batch = np.zeros([self.config['batch_size_trn'], ] + self.config['input_shape'])
-                tags_batch = np.zeros([self.config['batch_size_trn'], ] + self.config['output_shape'])
+                imgs_batch = np.zeros(img_batch_shape, dtype=np.float32)
+                tags_batch = np.zeros(tag_batch_shape, dtype=np.uint8)
 
                 for batch_idx in range(self.config['batch_size_trn']):
                     img_idx = next(_imgs_idxs)
@@ -203,7 +207,7 @@ class Godard(object):
                     if transform:
                         img = random_transforms(img, nb_min=0, nb_max=4)
                     imgs_batch[batch_idx] = img
-                    tags_batch[batch_idx] = tagset_to_ints(tag_sets[img_idx])
+                    tags_batch[batch_idx] = tag_set_ints[img_idx]
 
                 yield imgs_batch, tags_batch
 
