@@ -1,7 +1,9 @@
 # ResNet50
 
 import numpy as np
+import tensorflow as tf
 np.random.seed(317)
+tf.set_random_seed(318)
 
 from glob import glob
 from itertools import cycle
@@ -12,66 +14,22 @@ from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
 from keras.losses import kullback_leibler_divergence as KLD
 from keras.applications import resnet50
-from os import path, mkdir
-from skimage.transform import resize
+from math import ceil
+from os import path, mkdir, listdir
+from PIL import Image
 from time import time
 import argparse
 import logging
 import keras.backend as K
 import pandas as pd
 import tifffile as tif
-from scipy.misc import imread 
+from scipy.misc import imread
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, TAGS, onehot_F2, random_transforms
+from planet.utils.data_utils import tagset_to_ints, onehot_to_taglist, TAGS, onehot_F2, random_transforms
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
-from planet.utils import model_utils
-
-
-class SamplePlot(Callback):  # copied unmodified from indiconv.py and vggnet.py - 5/16/2017
-
-    def __init__(self, batch_gen, file_name):
-        super(Callback, self).__init__()
-        self.logs = {}
-        self.batch_gen = batch_gen
-        self.file_name = file_name
-
-    def on_train_begin(self, logs={}):
-        self.logs = {}
-
-    def on_epoch_end(self, epoch, logs={}):
-
-        import matplotlib
-        matplotlib.use('agg')
-        import matplotlib.pyplot as plt
-
-        imgs_batch, tags_batch = next(self.batch_gen)
-        tags_pred = self.model.predict(imgs_batch)
-
-        nrows, ncols = min(len(imgs_batch), 10), 2
-        fig, _ = plt.subplots(nrows, ncols, figsize=(8, nrows * 2.5))
-        scatter_x = np.arange(len(TAGS))
-        scatter_xticks = [t[:5] for t in TAGS]
-
-        for idx, (img, tt, tp) in enumerate(zip(imgs_batch, tags_batch, tags_pred)):
-            if idx >= nrows:
-                break
-            ax1, ax2 = fig.axes[idx * 2 + 0], fig.axes[idx * 2 + 1]
-            ax1.axis('off')
-            ax1.imshow(img[:, :, :3])
-            ax2.scatter(scatter_x, np.argmax(tp, axis=1) - np.argmax(tt, axis=1), marker='x')
-            ax2.set_xticks(scatter_x)
-            ax2.set_xticklabels(scatter_xticks, rotation='vertical')
-            ax2.set_ylim(-1.1, 1.1)
-            ax2.set_yticks([-1, 0, 1])
-            ax2.set_yticklabels(['FN', 'OK', 'FP'])
-
-        plt.subplots_adjust(hspace=0.5)
-        plt.suptitle('Epoch %d' % (epoch + 1))
-        plt.savefig(self.file_name)
-        plt.close()
 
 
 class ResNet50_softmax(object):
@@ -79,18 +37,24 @@ class ResNet50_softmax(object):
     def __init__(self, checkpoint_name='ResNet50_softmax'):
         self.config = {
             'input_shape': [224, 224, 3],
-            'output_shape': [17, 2],
-            'batch_size': 65,  # Big boy GPU.
-            'nb_epochs': 200,
+            'output_shape': [17],
+            'batch_size_tst': 150,
+            'batch_size_trn': 32,
+            'trn_nb_epochs': 300,
             'trn_transform': True,
-            'imgs_dir': 'data/train-jpg-v2',
+            'trn_imgs_csv': 'data/train_v2.csv',
+            'trn_imgs_dir': 'data/train-jpg',
+            'tst_imgs_csv': 'data/sample_submission_v2.csv',
+            'tst_imgs_dir': 'data/test-jpg',
+            'extension': 'jpg',
+            'trn_prop_trn': 0.8,
+            'trn_prop_val': 0.2
         }
 
         self.checkpoint_name = checkpoint_name
         self.imgs = []
         self.lbls = []
         self.net = None
-        self.rng = np.random
 
     @property
     def cpdir(self):
@@ -99,128 +63,140 @@ class ResNet50_softmax(object):
             mkdir(cpdir)
         return cpdir
 
-    def create_net(self):
+    def create_net(self, weights_path=None):
         if tuple(self.config['input_shape']) != (224, 224, 3):
             print("ResNet50 has special restrictions on the input shape. Only remove this sys.exit call if you know what you're doing.")
             sys.exit(1)
 
         inputs = Input(shape=self.config['input_shape'])
-        res = resnet50.ResNet50(include_top=False, input_tensor=inputs)
+        res = resnet50.ResNet50(include_top=False, input_tensor=inputs, weights='imagenet')
 
         # Add a classifier for each class instead of a single classifier.
-        conv_flat = Flatten()(res.output)
+        x = Flatten()(res.output)
+        shared_out = Dropout(0.1)(x)
         classifiers = []
-        
-        x = Dropout(0.1)(conv_flat)
-        for n in range(self.config['output_shape'][0]):
-            classifiers.append(Dense(2, activation='softmax')(x))
+        for n in range(17):
+            classifiers.append(Dense(2, activation='softmax')(shared_out))
 
         # Concatenate classifiers and reshape to match output shape.
         x = concatenate(classifiers, axis=-1)
-        labels = x = Reshape(self.config['output_shape'], name='labels')(x)
+        x = Reshape((17, 2))(x)
+        x = Lambda(lambda x: x[:, :, 1])(x)
 
-        self.net = Model(inputs=res.input, outputs=labels)
+        self.net = Model(inputs=res.input, outputs=x)
 
-        def F2(yt, yp):
-            yt, yp = K.cast(K.argmax(yt, axis=2), 'float32'), K.cast(K.argmax(yp, axis=2), 'float32')
+        def prec(yt, yp):
+            yp = K.round(yp)
             tp = K.sum(yt * yp)
             fp = K.sum(K.clip(yp - yt, 0, 1))
+            return tp / (tp + fp + K.epsilon())
+
+        def reca(yt, yp):
+            yp = K.round(yp)
+            tp = K.sum(yt * yp)
             fn = K.sum(K.clip(yt - yp, 0, 1))
-            p = tp / (tp + fp)
-            r = tp / (tp + fn)
+            return tp / (tp + fn + K.epsilon())
+
+        def F2(yt, yp):
+            p = prec(yt, yp)
+            r = reca(yt, yp)
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        def dice_coef(yt, yp):
-            '''Dice coefficient from VNet paper.'''
-            yt, yp = yt[:, :, 1], yp[:, :, 1]
-            nmr = 2 * K.sum(yt * yp)
-            dnm = K.sum(yt**2) + K.sum(yp**2) + K.epsilon()
-            return nmr / dnm
+        def logloss(yt, yp):
+            wfn = 8.  # Weight false negative errors.
+            wfp = 1.  # Weight false positive errors.
+            wmult = (yt * wfn) + (K.abs(yt - 1) * wfp)
+            errors = yt * K.log(yp + 1e-7) + ((1 - yt) * K.log(1 - yp + 1e-7))
+            return -1 * K.mean(errors * wmult)
 
-        def dice_loss(yt, yp):
-            return 1 - dice_coef(yt, yp)
-        
-        def kl_loss(yt, yp):
-            return KLD(K.flatten(yt) / K.sum(yt), K.flatten(yp) / K.sum(yp))
- 
-        def custom_loss(yt, yp):
-            return dice_loss(yt, yp) + kl_loss(yt, yp)
-
-        self.net.compile(optimizer=Adam(0.0005), metrics=[F2, dice_loss, kl_loss], loss=custom_loss)
+        self.net.compile(optimizer=Adam(0.001), metrics=[F2, prec, reca], loss=logloss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
+        if weights_path is not None:
+            self.net.load_weights(weights_path)
+
     def train(self):
 
-        batch_gen = self.train_batch_gen('data/train_v2.csv', 'data/train-jpg-v2')
+        rng = np.random
+        imgs_idxs = np.arange(len(listdir(self.config['trn_imgs_dir'])))
+        imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
+        imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
+        imgs_idxs_val = imgs_idxs[-int(len(imgs_idxs) * self.config['trn_prop_val']):]
+        gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn,
+                                 self.config['trn_transform'])
+        gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val, False)
 
         cb = [
-            SamplePlot(batch_gen, '%s/samples.png' % self.cpdir),
             HistoryPlot('%s/history.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/loss.weights' % self.cpdir, monitor='loss', verbose=1,
-                            save_best_only=True, mode='min', save_weights_only=True),
-            ReduceLROnPlateau(monitor='loss', factor=0.8, patience=2, epsilon=0.005, verbose=1, mode='min'),
-            EarlyStopping(monitor='loss', min_delta=0.01, patience=15, verbose=1, mode='min')
+            ModelCheckpoint('%s/weights_val_F2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
+                            save_best_only=True, mode='max'),
+            ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=2,
+                              min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
+            EarlyStopping(monitor='val_F2', patience=30, verbose=1, mode='max')
         ]
 
-        self.net.fit_generator(batch_gen, steps_per_epoch=500, verbose=1, callbacks=cb,
-                               epochs=self.config['nb_epochs'], workers=3, pickle_safe=True, max_q_size=100)
+        nb_steps_trn = ceil(len(imgs_idxs_trn) * 1. / self.config['batch_size_trn'])
+        nb_steps_val = ceil(len(imgs_idxs_val) * 1. / self.config['batch_size_trn'])
 
-        return
+        self.net.fit_generator(gen_trn, steps_per_epoch=nb_steps_trn, epochs=self.config['trn_nb_epochs'],
+                               verbose=1, callbacks=cb,
+                               workers=3, pickle_safe=True,
+                               validation_data=gen_val, validation_steps=nb_steps_val)
 
-    def train_batch_gen(self, csv_path='data/train_v2.csv', imgs_dir='data/train-jpg-v2'):
+    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, transform=False):
 
-        logger = logging.getLogger(funcname())
+        rng = np.random
+        nb_steps = ceil(len(imgs_idxs) * 1. / self.config['batch_size_trn'])
 
-        # Helpers.
-        scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
-        onehot_to_distribution = lambda x: np.argmax(x, axis=1) / np.sum(np.argmax(x, axis=1))
-
-        # Read the CSV and error-check contents.
-        df = pd.read_csv(csv_path)
-        img_names = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
+        # Read the CSV and extract image names and tags.
+        df = pd.read_csv(imgs_csv)
+        imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
         tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
+        tag_set_ints = [tagset_to_ints(ts) for ts in tag_sets]
 
-        # Error check.
-        for img_name, tag_set in zip(img_names, tag_sets):
-            assert path.exists(img_name), img_name
-            assert len(tag_set) > 0, tag_set
+        img_batch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
+        tag_batch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
 
         while True:
 
-            # New batches at each iteration to prevent over-writing previous batch before it's used.
-            imgs_batch = np.zeros([self.config['batch_size'], ] + self.config['input_shape'], dtype=np.float32)
-            tags_batch = np.zeros([self.config['batch_size'], ] + self.config['output_shape'], dtype=np.uint8)
+            # Shuffle all the given images and make one complete pass through them before re-shuffling.
+            _imgs_idxs = cycle(rng.choice(imgs_idxs, len(imgs_idxs)))
+            for _ in range(nb_steps):
 
-            # Sample *self.config['batch_size']* random rows and build the batches.
-            for batch_idx in range(self.config['batch_size']):
-                data_idx = self.rng.randint(0, len(img_names))
+                imgs_batch = np.zeros(img_batch_shape, dtype=np.float32)
+                tags_batch = np.zeros(tag_batch_shape, dtype=np.uint8)
 
-                img = resize(imread(img_names[data_idx], mode='RGB'), self.config[
-                             'input_shape'][:2], preserve_range=True, mode='constant')
-                if self.config['trn_transform']:
-                    imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=2))
-                else:
-                    imgs_batch[batch_idx] = scale(img)
-                tags_batch[batch_idx] = tagset_to_onehot(tag_sets[data_idx])
+                for batch_idx in range(self.config['batch_size_trn']):
+                    img_idx = next(_imgs_idxs)
+                    img = self.img_path_to_img(imgs_paths[img_idx])
+                    if transform:
+                        img = random_transforms(img, nb_min=0, nb_max=4)
+                    imgs_batch[batch_idx] = img
+                    tags_batch[batch_idx] = tag_set_ints[img_idx]
 
-            yield imgs_batch, tags_batch
+                yield imgs_batch, tags_batch
 
-    def predict(self, img_batch):
-        scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
+    def img_path_to_img(self, img_path):
+        img = Image.open(img_path).convert('RGB')
+        img.thumbnail(self.config['input_shape'][:2])
+        img = np.asarray(img, dtype=np.float32) / 255.
+        return img
 
-        for idx in range(len(img_batch)):
-            img_batch[idx] = scale(img_batch[idx])
+    def predict(self, imgs_names):
 
-        tags_pred = self.net.predict(img_batch)
-        tags_pred = tags_pred.round().astype(np.uint8)
+        imgs_dir = self.config['trn_imgs_dir'] if 'train' in imgs_names[0] else self.config['tst_imgs_dir']
+        imgs_paths = ['%s/%s.%s' % (imgs_dir, name, self.config['extension']) for name in imgs_names]
+        shape = [len(imgs_names), ] + self.config['input_shape']
+        imgs_batch = np.zeros(shape, dtype=np.float32)
 
-        # Convert from onehot to an array of bools
-        tags_pred = tags_pred[:, :, 1]
-        return tags_pred
+        for bidx, img_path in enumerate(imgs_paths):
+            imgs_batch[bidx] = self.img_path_to_img(img_path)
+
+        return self.net.predict(imgs_batch).round().astype(np.uint8)
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
-    model_runner(ResNet50_softmax)
+    model_runner(ResNet50_softmax())
