@@ -13,12 +13,10 @@ from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, R
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LambdaCallback
 from keras.layers.advanced_activations import PReLU
-from keras.regularizers import l2
 from math import ceil
 from os import path, mkdir, listdir
 from PIL import Image
 from time import time
-import argparse
 import logging
 import keras.backend as K
 import pandas as pd
@@ -28,7 +26,7 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagstr_to_ints, onehot_to_taglist, onehot_F2, random_transforms, TAGS, TAGS_short
+from planet.utils.data_utils import tagstr_to_binary, random_transforms, TAGS, TAGS_short, correct_tags
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
@@ -40,7 +38,7 @@ class Godard(object):
         self.config = {
             'input_shape': [64, 64, 3],
             'output_shape': [17],
-            'batch_size_tst': 1500,
+            'batch_size_tst': 2000,
             'batch_size_trn': 64,
             'trn_nb_epochs': 300,
             'trn_transform': True,
@@ -167,7 +165,7 @@ class Godard(object):
                 return K.sum(yt[:, i])
             tcnt_metrics.append(tagcnt)
 
-        self.net.compile(optimizer=Adam(0.0015),
+        self.net.compile(optimizer=Adam(0.002),
                          metrics=[F2, prec, reca, myt, myp] + tf2_metrics + tcnt_metrics,
                          loss=logloss)
         self.net.summary()
@@ -183,14 +181,14 @@ class Godard(object):
         rng = np.random
 
         imgs_idxs = np.arange(len(listdir(self.config['trn_imgs_dir'])))
-        imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
+        rng.shuffle(imgs_idxs)
         imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
         imgs_idxs_val = imgs_idxs[-int(len(imgs_idxs) * self.config['trn_prop_val']):]
 
         gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn,
-                                 transform=self.config['trn_transform'], balanced=True)
+                                 transform=self.config['trn_transform'])
         gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val,
-                                 transform=False, balanced=False)
+                                 transform=False)
 
         def print_tag_F2_metrics(epoch, logs):
 
@@ -221,7 +219,7 @@ class Godard(object):
                                workers=3, pickle_safe=True,
                                validation_data=gen_val, validation_steps=nb_steps_val)
 
-    def batch_gen(self, imgs_csv, imgs_dir, img_idxs, transform=False, balanced=False):
+    def batch_gen(self, imgs_csv, imgs_dir, img_idxs, transform=False):
 
         # Helpers.
         rng = np.random
@@ -235,7 +233,7 @@ class Godard(object):
         # Read the CSV and extract image paths and tags.
         df = pd.read_csv(imgs_csv)
         img_pths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
-        img_tags = [tagstr_to_ints(tstr) for tstr in df['tags'].values]
+        img_tags = [tagstr_to_binary(tstr) for tstr in df['tags'].values]
 
         # Mapping from tag to image indexes.
         tags_to_img_idxs = [[] for _ in range(len(TAGS))]
@@ -244,36 +242,26 @@ class Godard(object):
             for t in pos_tags:
                 tags_to_img_idxs[t].append(img_idx)
 
-        # Convert to cycles for sequential sampling.
+        # Convert to cycles.
         for i in range(len(TAGS)):
-            tags_to_img_idxs[i] = cycle(shuffle(tags_to_img_idxs[i]))
-
-        # Cycle on image indexes for consecutive sampling (when balanced = False).
-        img_idxs_cycle = cycle(img_idxs)
+            tags_to_img_idxs[i] = cycle(tags_to_img_idxs[i])
 
         while True:
 
-            # Shuffle order of tags for balanced sampling.
-            tag_idxs = cycle(shuffle(np.arange(len(TAGS))))
+            # Shuffled cycle image indexes for consecutive sampling.
+            img_idxs_cycle = cycle(shuffle(img_idxs))
 
             for _ in range(nb_steps):
 
                 imgs_batch = np.zeros(img_batch_shape, dtype=np.float32)
                 tags_batch = np.zeros(tag_batch_shape, dtype=np.uint8)
 
-                for batch_idx in range(self.config['batch_size_trn']):
-
-                    if balanced:
-                        tag_idx = next(tag_idxs)
-                        img_idx = next(tags_to_img_idxs[tag_idx])
-                    else:
-                        img_idx = next(img_idxs_cycle)
-
-                    imgs_batch[batch_idx] = self.img_path_to_img(img_pths[img_idx])
-                    tags_batch[batch_idx] = img_tags[img_idx]
-
+                for bidx in range(self.config['batch_size_trn']):
+                    iidx = next(tags_to_img_idxs[bidx]) if bidx < len(TAGS) else next(img_idxs_cycle)
+                    imgs_batch[bidx] = self.img_path_to_img(img_pths[iidx])
+                    tags_batch[bidx] = img_tags[iidx]
                     if transform:
-                        imgs_batch[batch_idx] = random_transforms(imgs_batch[batch_idx], 0, 4)
+                        imgs_batch[bidx] = random_transforms(imgs_batch[bidx], 0, 4)
 
                 yield imgs_batch, tags_batch
 
@@ -293,7 +281,11 @@ class Godard(object):
         for bidx, img_path in enumerate(imgs_paths):
             imgs_batch[bidx] = self.img_path_to_img(img_path)
 
-        return self.net.predict(imgs_batch).round().astype(np.uint8)
+        tags_pred = self.net.predict(imgs_batch)
+        for i in range(len(tags_pred)):
+            tags_pred[i] = correct_tags(tags_pred[i])
+
+        return tags_pred.round().astype(np.uint8)
 
     def visualize_activation(self):
 

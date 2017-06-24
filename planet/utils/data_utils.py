@@ -7,20 +7,48 @@ import skimage.transform as sktf
 
 
 # Never change the order here.
-TAGS = sorted(['agriculture', 'artisinal_mine', 'bare_ground', 'blooming', 'blow_down', 'clear', 'cloudy', 'conventional_mine',
-               'cultivation', 'habitation', 'haze', 'partly_cloudy', 'primary', 'road', 'selective_logging', 'slash_burn', 'water'])
+TAGS = [
+    'agriculture',              # 0
+    'artisinal_mine',           # 1
+    'bare_ground',              # 2
+    'blooming',                 # 3
+    'blow_down',                # 4
+    'clear',                    # 5
+    'cloudy',                   # 6
+    'conventional_mine',        # 7
+    'cultivation',              # 8
+    'habitation',               # 9
+    'haze',                     # 10
+    'partly_cloudy',            # 11
+    'primary',                  # 12
+    'road',                     # 13
+    'selective_logging',        # 14
+    'slash_burn',               # 15
+    'water']                    # 16
 
 TAGS_short = [t[:4] for t in TAGS]
 
 
-def tagset_to_onehot(tagset):
-    tags = np.zeros((len(TAGS), 2), dtype=np.uint8)
-    for idx, tag in enumerate(TAGS):
-        tags[idx][int(tag in tagset)] = 1
+def correct_tags(tags):
+
+    # "cloudy" nullifies all other predictions.
+    cloudy_idx = 6
+    if np.argmax(tags) == cloudy_idx:
+        tags *= 0
+        tags[cloudy_idx] = 1.
+
+    # Pick the maximum cloud-cover and remove all others.
+    cc_idxs = [5, 6, 10, 11]
+    cc_msk = np.zeros(len(TAGS), dtype=np.uint8)
+    cc_msk[cc_idxs] = 1.
+    cc_max_idx = np.argmax(tags * cc_msk)
+    tags[cc_idxs] = 0.
+    tags[cc_max_idx] = 1.
+
     return tags
 
 
-def tagstr_to_ints(tagstr):
+def tagstr_to_binary(tagstr):
     tagset = set(tagstr.strip().split(' '))
     tags = np.zeros((len(TAGS)), dtype=np.uint8)
     for idx, tag in enumerate(TAGS):
@@ -29,12 +57,12 @@ def tagstr_to_ints(tagstr):
     return tags
 
 
-def boolarray_to_taglist(boolarray):
-    taglist = []
+def binary_to_tagstr(binary):
+    s = ''
     for idx, tag in enumerate(TAGS):
-        if boolarray[idx] == 1:
-            taglist.append(tag)
-    return taglist
+        if binary[idx] == 1:
+            s += tag + ' '
+    return s.strip()
 
 
 def onehot_to_taglist(onehot):

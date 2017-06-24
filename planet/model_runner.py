@@ -8,7 +8,7 @@ from time import time
 from skimage.transform import resize
 from scipy.misc import imread
 from sklearn.metrics import precision_score, recall_score
-from planet.utils.data_utils import bool_F2, tagstr_to_ints, boolarray_to_taglist
+from planet.utils.data_utils import bool_F2, tagstr_to_binary, binary_to_tagstr, correct_tags
 
 
 def model_runner(model):
@@ -73,27 +73,20 @@ def model_runner(model):
             tags_true = df[idx:idx + model.config['batch_size_tst']]['tags'].values
             tags_pred = model.predict(img_names)
             for tt, tp in zip(tags_true, tags_pred):
-                tt = tagstr_to_ints(tt)
+                tt = tagstr_to_binary(tt)
                 F2_scores.append(bool_F2(tt, tp))
                 prec_scores.append(precision_score(tt, tp))
                 reca_scores.append(recall_score(tt, tp))
 
-            # Progress...
-            logger.info('%d/%d F2 running = %.2lf, F2 batch = %.2lf' %
+            # Progress and metrics...
+            logger.info('%d/%d F2 running=%.4lf, F2 batch=%.4lf' %
                         (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
-            logger.info('%d/%d prec running = %.2lf, prec batch = %.2lf' %
+            logger.info('%d/%d prec running=%.4lf, prec batch=%.4lf' %
                         (idx, df.shape[0], np.mean(prec_scores), np.mean(prec_scores[idx:])))
-            logger.info('%d/%d reca running = %.2lf, reca batch = %.2lf' %
+            logger.info('%d/%d reca running=%.4lf, reca batch=%.4lf' %
                         (idx, df.shape[0], np.mean(reca_scores), np.mean(reca_scores[idx:])))
 
         logger.info('F2 final = %lf' % np.mean(F2_scores))
-
-    # Experimental threshold optimization.
-    elif args['which'] == 'optimize':
-        model.optimize()
-
-    elif args['which'] == 'visualize':
-        model.visualize_activation()
 
     elif args['which'] == 'predict' and args['dataset'] == 'test':
         df = pd.read_csv(model.config['tst_imgs_csv'])
@@ -107,8 +100,8 @@ def model_runner(model):
             tags_pred = model.predict(img_names)
 
             for img_name, tp in zip(img_names, tags_pred):
-                tp = ' '.join(boolarray_to_taglist(tp))
-                submission_rows.append([img_name, tp])
+                tpstr = binary_to_tagstr(tp)
+                submission_rows.append([img_name, tpstr])
 
             # Progress...
             logger.info('%d/%d' % (idx, df.shape[0]))
@@ -117,3 +110,10 @@ def model_runner(model):
         df_sub = pd.DataFrame(submission_rows, columns=['image_name', 'tags'])
         df_sub.to_csv(sub_path, index=False)
         logger.info('Submission saved to %s.' % sub_path)
+
+    # Experimental threshold optimization.
+    elif args['which'] == 'optimize':
+        model.optimize()
+
+    elif args['which'] == 'visualize':
+        model.visualize_activation()
