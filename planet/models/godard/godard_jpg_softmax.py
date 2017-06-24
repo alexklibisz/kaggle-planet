@@ -71,9 +71,9 @@ class Godard(object):
         x = BatchNormalization(axis=3)(inputs)
 
         conv_num = 0
-        def conv_block(nb_filters, prop_dropout, name,x):
+        def conv_block(nb_filters, prop_dropout, x):
             ki = 'he_uniform'
-            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki, name=name)(x)
+            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
             x = PReLU()(x)
             x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
             x = PReLU()(x)
