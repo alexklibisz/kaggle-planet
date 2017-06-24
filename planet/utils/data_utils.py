@@ -10,6 +10,8 @@ import skimage.transform as sktf
 TAGS = sorted(['agriculture', 'artisinal_mine', 'bare_ground', 'blooming', 'blow_down', 'clear', 'cloudy', 'conventional_mine',
                'cultivation', 'habitation', 'haze', 'partly_cloudy', 'primary', 'road', 'selective_logging', 'slash_burn', 'water'])
 
+TAGS_short = [t[:4] for t in TAGS]
+
 
 def tagset_to_onehot(tagset):
     tags = np.zeros((len(TAGS), 2), dtype=np.uint8)

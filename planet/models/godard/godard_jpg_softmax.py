@@ -11,7 +11,7 @@ from keras.optimizers import Adam
 from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
 from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LearningRateScheduler
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LambdaCallback
 from keras.layers.advanced_activations import PReLU
 from keras.regularizers import l2
 from math import ceil
@@ -28,7 +28,7 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_ints, onehot_to_taglist, TAGS, onehot_F2, random_transforms
+from planet.utils.data_utils import tagset_to_ints, onehot_to_taglist, onehot_F2, random_transforms, TAGS, TAGS_short
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
@@ -142,7 +142,32 @@ class Godard(object):
             size = K.sum(K.ones_like(yt))
             return (size - nbwrong) / size
 
-        self.net.compile(optimizer=Adam(0.0015), metrics=[F2, prec, reca], loss=logloss)
+        # Decorator for procedurally generating functions with different names.
+        def rename(newname):
+            def decorator(f):
+                f.__name__ = newname
+                return f
+            return decorator
+
+        # Generate an F2 metric for each tag.
+        tf2_metrics = []
+        for i, t in enumerate(TAGS_short):
+            @rename('F2_%s' % t)
+            def tagF2(yt, yp, i=i):
+                return F2(yt[:, i], yp[:, i])
+            tf2_metrics.append(tagF2)
+
+        # Generate a metric for each tag that tracks how often it occurs in a batch.
+        tcnt_metrics = []
+        for i, t in enumerate(TAGS_short):
+            @rename('cnt_%s' % t)
+            def tagcnt(yt, yp, i=i):
+                return K.sum(yt[:, i])
+            tcnt_metrics.append(tagcnt)
+
+        self.net.compile(optimizer=Adam(0.0015),
+                         metrics=[F2, prec, reca] + tf2_metrics + tcnt_metrics,
+                         loss=logloss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
@@ -151,7 +176,9 @@ class Godard(object):
 
     def train(self):
 
+        logger = logging.getLogger(funcname())
         rng = np.random
+
         imgs_idxs = np.arange(len(listdir(self.config['trn_imgs_dir'])))
         imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
         imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
@@ -160,7 +187,18 @@ class Godard(object):
                                  self.config['trn_transform'])
         gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val, False)
 
+        def print_tag_F2_metrics(epoch, logs):
+
+            for tag in TAGS_short:
+                f2_trn = logs['F2_%s' % tag]
+                f2_val = logs['val_F2_%s' % tag]
+                cnt_trn = logs['cnt_%s' % tag]
+                cnt_val = logs['val_cnt_%s' % tag]
+                logger.info('%-6s F2 trn=%-6.3lf cnt=%-6.2lf F2 val=%-6.3lf cnt=%6-.2lf' %
+                            (tag, f2_trn, cnt_trn, f2_val, cnt_val))
+
         cb = [
+            LambdaCallback(on_epoch_end=print_tag_F2_metrics),
             HistoryPlot('%s/history.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/weights_val_F2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
