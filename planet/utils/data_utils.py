@@ -20,7 +20,8 @@ def tagset_to_onehot(tagset):
     return tags
 
 
-def tagset_to_ints(tagset):
+def tagstr_to_ints(tagstr):
+    tagset = set(tagstr.strip().split(' '))
     tags = np.zeros((len(TAGS)), dtype=np.uint8)
     for idx, tag in enumerate(TAGS):
         if tag in tagset:

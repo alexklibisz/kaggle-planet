@@ -28,7 +28,7 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_ints, onehot_to_taglist, onehot_F2, random_transforms, TAGS, TAGS_short
+from planet.utils.data_utils import tagstr_to_ints, onehot_to_taglist, onehot_F2, random_transforms, TAGS, TAGS_short
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
@@ -194,7 +194,7 @@ class Godard(object):
                 f2_val = logs['val_F2_%s' % tag]
                 cnt_trn = logs['cnt_%s' % tag]
                 cnt_val = logs['val_cnt_%s' % tag]
-                logger.info('%-6s F2 trn=%-6.3lf cnt=%-6.2lf F2 val=%-6.3lf cnt=%6-.2lf' %
+                logger.info('%-6s F2 trn=%-6.3lf cnt=%-6.2lf F2 val=%-6.3lf cnt=%-6.2lf' %
                             (tag, f2_trn, cnt_trn, f2_val, cnt_val))
 
         cb = [
@@ -216,36 +216,49 @@ class Godard(object):
                                workers=3, pickle_safe=True,
                                validation_data=gen_val, validation_steps=nb_steps_val)
 
-    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, transform=False):
+    def batch_gen(self, imgs_csv, imgs_dir, img_idxs, transform=False):
 
         rng = np.random
-        nb_steps = ceil(len(imgs_idxs) * 1. / self.config['batch_size_trn'])
-
-        # Read the CSV and extract image names and tags.
-        df = pd.read_csv(imgs_csv)
-        imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
-        tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
-        tag_set_ints = [tagset_to_ints(ts) for ts in tag_sets]
-
+        nb_steps = ceil(len(img_idxs) * 1. / self.config['batch_size_trn'])
         img_batch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
         tag_batch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
 
+        # Read the CSV and extract image names and tags.
+        df = pd.read_csv(imgs_csv)
+        img_pths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
+        img_tags = [tagstr_to_ints(tstr) for tstr in df['tags'].values]
+
+        # Mapping from tag to image indexes.
+        tags_to_img_idxs = [[] for _ in range(len(TAGS))]
+        for img_idx, tags in enumerate(img_tags):
+            pos_tags, = np.where(tags == 1.)
+            for t in pos_tags:
+                tags_to_img_idxs[t].append(img_idx)
+
+        # Track the frequency of samples for each tag and sample from the least frequent.
+        tag_freq = np.zeros(len(TAGS), dtype=np.uint64)
+
         while True:
 
-            # Shuffle all the given images and make one complete pass through them before re-shuffling.
-            _imgs_idxs = cycle(rng.choice(imgs_idxs, len(imgs_idxs)))
             for _ in range(nb_steps):
 
                 imgs_batch = np.zeros(img_batch_shape, dtype=np.float32)
                 tags_batch = np.zeros(tag_batch_shape, dtype=np.uint8)
 
                 for batch_idx in range(self.config['batch_size_trn']):
-                    img_idx = next(_imgs_idxs)
-                    img = self.img_path_to_img(imgs_paths[img_idx])
+
+                    tag_idx = np.argmin(tag_freq)
+                    img_idx = rng.choice(tags_to_img_idxs[tag_idx])
+
+                    img = self.img_path_to_img(img_pths[img_idx])
+                    tags = img_tags[img_idx]
+                    tag_freq += tags
+                    assert tags[tag_idx] == 1.
+
                     if transform:
                         img = random_transforms(img, nb_min=0, nb_max=4)
                     imgs_batch[batch_idx] = img
-                    tags_batch[batch_idx] = tag_set_ints[img_idx]
+                    tags_batch[batch_idx] = tags
 
                 yield imgs_batch, tags_batch
 

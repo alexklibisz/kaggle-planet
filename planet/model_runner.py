@@ -8,7 +8,7 @@ from time import time
 from skimage.transform import resize
 from scipy.misc import imread
 from sklearn.metrics import precision_score, recall_score
-from planet.utils.data_utils import bool_F2, tagset_to_ints, boolarray_to_taglist
+from planet.utils.data_utils import bool_F2, tagstr_to_ints, boolarray_to_taglist
 
 
 def model_runner(model):
@@ -68,7 +68,7 @@ def model_runner(model):
             tags_true = df[idx:idx + model.config['batch_size_tst']]['tags'].values
             tags_pred = model.predict(img_names)
             for tt, tp in zip(tags_true, tags_pred):
-                tt = tagset_to_ints(set(tt.split(' ')))
+                tt = tagstr_to_ints(tt)
                 F2_scores.append(bool_F2(tt, tp))
                 prec_scores.append(precision_score(tt, tp))
                 reca_scores.append(recall_score(tt, tp))
