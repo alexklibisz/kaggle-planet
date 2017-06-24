@@ -4,7 +4,6 @@ import tifffile as tif
 import numpy as np
 import pandas as pd
 import skimage.transform as sktf
-from planet.utils.runtime import memory_usage
 
 
 # Never change the order here.
