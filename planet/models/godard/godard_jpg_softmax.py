@@ -183,9 +183,11 @@ class Godard(object):
         imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
         imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
         imgs_idxs_val = imgs_idxs[-int(len(imgs_idxs) * self.config['trn_prop_val']):]
+
         gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn,
-                                 self.config['trn_transform'])
-        gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val, False)
+                                 transform=self.config['trn_transform'], balanced=True)
+        gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val,
+                                 transform=False, balanced=False)
 
         def print_tag_F2_metrics(epoch, logs):
 
@@ -216,7 +218,7 @@ class Godard(object):
                                workers=3, pickle_safe=True,
                                validation_data=gen_val, validation_steps=nb_steps_val)
 
-    def batch_gen(self, imgs_csv, imgs_dir, img_idxs, transform=False):
+    def batch_gen(self, imgs_csv, imgs_dir, img_idxs, transform=False, balanced=False):
 
         rng = np.random
         nb_steps = ceil(len(img_idxs) * 1. / self.config['batch_size_trn'])
@@ -235,8 +237,12 @@ class Godard(object):
             for t in pos_tags:
                 tags_to_img_idxs[t].append(img_idx)
 
-        # Track the frequency of samples for each tag and sample from the least frequent.
+        # Track the frequency of samples for each tag and sample from the least frequent
+        # for balanced sampling (when balanced = True).
         tag_freq = np.zeros(len(TAGS), dtype=np.uint64)
+
+        # Cycle over image indexes for consecutive sampling (when balanced = False).
+        img_idxs_cycle = cycle(img_idxs)
 
         while True:
 
@@ -247,16 +253,21 @@ class Godard(object):
 
                 for batch_idx in range(self.config['batch_size_trn']):
 
-                    tag_idx = np.argmin(tag_freq)
-                    img_idx = rng.choice(tags_to_img_idxs[tag_idx])
-
-                    img = self.img_path_to_img(img_pths[img_idx])
-                    tags = img_tags[img_idx]
-                    tag_freq += tags
-                    assert tags[tag_idx] == 1.
+                    if balanced:
+                        tag_idx = np.argmin(tag_freq)
+                        img_idx = rng.choice(tags_to_img_idxs[tag_idx])
+                        img = self.img_path_to_img(img_pths[img_idx])
+                        tags = img_tags[img_idx]
+                        tag_freq += tags
+                        assert tags[tag_idx] == 1.
+                    else:
+                        img_idx = next(img_idxs_cycle)
+                        img = self.img_path_to_img(img_pths[img_idx])
+                        tags = img_tags[img_idx]
 
                     if transform:
                         img = random_transforms(img, nb_min=0, nb_max=4)
+
                     imgs_batch[batch_idx] = img
                     tags_batch[batch_idx] = tags
 
