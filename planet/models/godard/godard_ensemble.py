@@ -148,7 +148,7 @@ def create_net(config):
     x = Conv2D(128, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = Conv2D(128, (3, 3), padding='same', activation='relu', kernel_initializer=ki, kernel_regularizer=kreg)(x)
     x = MaxPooling2D(pool_size=2)(x)
-    # x = Dropout(0.5)(x)
+    x = Dropout(0.5)(x)
 
     x = Flatten()(x)
 
@@ -187,7 +187,7 @@ class GodardEnsemble(object):
             'output_shape': [1, ],
             'batch_size_tst': 2400,
             'batch_size_trn': 32,
-            'trn_nb_epochs': 15,
+            'trn_nb_epochs': 30,
             'trn_augment': True,
             'img_ext': 'jpg',
             'trn_imgs_csv': 'data/train_v2.csv',
@@ -211,6 +211,8 @@ class GodardEnsemble(object):
 
     def create_net(self, weights_path=None):
 
+        logger = logging.getLogger(funcname())
+
         # Networks stored in order corresponding to the tags.
         self.nets = [create_net(self.config) for t in TAGS]
 
@@ -221,7 +223,8 @@ class GodardEnsemble(object):
         # Load weights if given.
         if weights_path is not None:
             weight_paths = [l.strip() for l in open(weights_path)]
-            for net, p in zip(nets, weight_paths):
+            for net, t, p in zip(self.nets, TAGS, weight_paths):
+                logger.info('tag: %-20s weights: %s' % (t, p))
                 net.load_weights(p)
 
     def train(self):
@@ -260,10 +263,27 @@ class GodardEnsemble(object):
         logger.info('Training complete.')
 
     def _get_img_by_path(self, img_path):
-        return
+        img = Image.open(img_path).convert('RGB')
+        img.thumbnail(self.config['input_shape'][:2])
+        img = np.asarray(img, dtype=np.float32) / 255.
+        return img
 
-    def predict(self, img_names, thresholds=None):
-        return
+    def predict(self, imgs_names):
+
+        imgs_dir = self.config['trn_imgs_dir'] if 'train' in imgs_names[0] else self.config['tst_imgs_dir']
+        imgs_paths = ['%s/%s.%s' % (imgs_dir, name, self.config['img_ext']) for name in imgs_names]
+        imgs_batch_shape = [len(imgs_names), ] + self.config['input_shape']
+        tags_batch_shape = [len(imgs_names), len(self.nets)]
+        imgs_batch = np.zeros(imgs_batch_shape, dtype=np.float32)
+        tags_batch = np.zeros(tags_batch_shape, dtype=np.uint8)
+
+        for bidx, img_path in enumerate(imgs_paths):
+            imgs_batch[bidx] = self._get_img_by_path(img_path)
+
+        for tidx, net in enumerate(self.nets):
+            tags_batch[:, tidx] = net.predict(imgs_batch)[:, 0].round()
+
+        return tags_batch
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner

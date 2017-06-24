@@ -48,7 +48,7 @@ class Godard(object):
             'trn_imgs_dir': 'data/train-jpg',
             'tst_imgs_csv': 'data/sample_submission_v2.csv',
             'tst_imgs_dir': 'data/test-jpg',
-            'extension': 'jpg',
+            'img_ext': 'jpg',
             'trn_prop_trn': 0.8,
             'trn_prop_val': 0.2
         }
@@ -220,7 +220,7 @@ class Godard(object):
     def predict(self, imgs_names):
 
         imgs_dir = self.config['trn_imgs_dir'] if 'train' in imgs_names[0] else self.config['tst_imgs_dir']
-        imgs_paths = ['%s/%s.%s' % (imgs_dir, name, self.config['extension']) for name in imgs_names]
+        imgs_paths = ['%s/%s.%s' % (imgs_dir, name, self.config['img_ext']) for name in imgs_names]
         shape = [len(imgs_names), ] + self.config['input_shape']
         imgs_batch = np.zeros(shape, dtype=np.float32)
 

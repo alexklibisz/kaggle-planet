@@ -7,6 +7,7 @@ import numpy as np
 from time import time
 from skimage.transform import resize
 from scipy.misc import imread
+from sklearn.metrics import precision_score, recall_score
 from planet.utils.data_utils import bool_F2, tagset_to_ints, boolarray_to_taglist
 
 
@@ -57,7 +58,7 @@ def model_runner(model):
 
     elif args['which'] == 'predict' and args['dataset'] == 'train':
         df = pd.read_csv(model.config['trn_imgs_csv'])
-        F2_scores = []
+        prec_scores, reca_scores, F2_scores = [], [], []
 
         # Reading images, making predictions in batches, tracking F2 scores.
         for idx in range(0, df.shape[0], model.config['batch_size_tst']):
@@ -69,10 +70,16 @@ def model_runner(model):
             for tt, tp in zip(tags_true, tags_pred):
                 tt = tagset_to_ints(set(tt.split(' ')))
                 F2_scores.append(bool_F2(tt, tp))
+                prec_scores.append(precision_score(tt, tp))
+                reca_scores.append(recall_score(tt, tp))
 
             # Progress...
             logger.info('%d/%d F2 running = %.2lf, F2 batch = %.2lf' %
                         (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
+            logger.info('%d/%d prec running = %.2lf, prec batch = %.2lf' %
+                        (idx, df.shape[0], np.mean(prec_scores), np.mean(prec_scores[idx:])))
+            logger.info('%d/%d reca running = %.2lf, reca batch = %.2lf' %
+                        (idx, df.shape[0], np.mean(reca_scores), np.mean(reca_scores[idx:])))
 
         logger.info('F2 final = %lf' % np.mean(F2_scores))
 
