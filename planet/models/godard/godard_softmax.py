@@ -17,6 +17,7 @@ from keras.layers.advanced_activations import PReLU
 from math import ceil
 from os import path, mkdir, listdir
 from PIL import Image
+from skimage.transform import resize
 from sklearn.model_selection import train_test_split
 from time import time
 import logging
@@ -43,25 +44,27 @@ def rename(newname):
 
 class Godard(object):
 
-    def __init__(self, checkpoint_name='godard_jpg_softmax'):
+    def __init__(self, checkpoint_name='godard_softmax'):
 
         self.config = {
-            'input_shape': [64, 64, 3],
-            'output_shape': [17],
+            'input_shape': (64, 64, 4),
+            'output_shape': (17,),
             'batch_size_tst': 2000,
             'batch_size_trn': 64,
             'nb_epochs': 300,
             'nb_augment_max': 10,
             'prop_val': 0.2,
             'imgs_csv_trn': 'data/train_v2.csv',
-            'imgs_dir_trn': 'data/train-jpg',
+            'imgs_dir_trn': 'data/train-tif-v2',
             'imgs_csv_tst': 'data/sample_submission_v2.csv',
-            'imgs_dir_tst': 'data/test-jpg',
-            'imgs_ext': 'jpg',
-            'cpname': checkpoint_name
+            'imgs_dir_tst': 'data/test-tif-v2',
+            'img_ext': 'tif',
+            'cpname': checkpoint_name,
+            'cache_imgs': True
         }
 
         self.net = None
+        self.imgs_cache = {}
 
     @property
     def cpdir(self):
@@ -75,7 +78,7 @@ class Godard(object):
         logger = logging.getLogger(funcname())
 
         inputs = Input(shape=self.config['input_shape'])
-        x = inputs
+        x = BatchNormalization(axis=3)(inputs)
 
         def conv_block(nb_filters, prop_dropout, x):
             ki = 'he_uniform'
@@ -208,18 +211,17 @@ class Godard(object):
 
         self.net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.config['nb_epochs'],
                                verbose=1, callbacks=cb,
-                               workers=3, pickle_safe=True,
                                validation_data=gen_val, validation_steps=steps_val)
 
     def batch_gen(self, iidxs, nb_steps=100, nb_augment_max=0):
 
         # Constants.
-        ibatch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
-        tbatch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
+        ibatch_shape = (self.config['batch_size_trn'],) + self.config['input_shape']
+        tbatch_shape = (self.config['batch_size_trn'],) + self.config['output_shape']
 
         # Read the CSV and extract image paths and tags.
         df = pd.read_csv(self.config['imgs_csv_trn'])
-        paths = ['%s/%s.jpg' % (self.config['imgs_dir_trn'], n) for n in df['image_name'].values]
+        paths = ['%s/%s.%s' % (self.config['imgs_dir_trn'], n, self.config['img_ext']) for n in df['image_name'].values]
         tags = [tagstr_to_binary(ts) for ts in df['tags'].values]
 
         aug_funcs = [
@@ -254,10 +256,25 @@ class Godard(object):
             assert set(iidxs_sampled) == set(iidxs)
 
     def img_path_to_img(self, img_path):
-        img = Image.open(img_path).convert('RGB')
-        img.thumbnail(self.config['input_shape'][:2])
-        img = np.asarray(img)
-        return img / 255.
+
+        if self.config['cache_imgs'] and img_path in self.imgs_cache:
+            return self.imgs_cache[img_path]
+
+        if self.config['img_ext'] == 'jpg':
+            img = Image.open(img_path).convert('RGB')
+            img.thumbnail(self.config['input_shape'][:2])
+            img = np.asarray(img).astype(np.float16)
+            img /= 2.**8
+
+        elif self.config['img_ext'] == 'tif':
+            img = tif.imread(img_path).astype(np.float16)
+            img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
+            img /= 2.**16
+
+        if self.config['cache_imgs']:
+            self.imgs_cache[img_path] = img
+
+        return img
 
     def predict(self, imgs_names):
 
