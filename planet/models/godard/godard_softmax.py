@@ -15,7 +15,7 @@ from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LambdaCallback
 from keras.layers.advanced_activations import PReLU
 from math import ceil
-from os import path, mkdir, listdir
+from os import path, mkdir, listdir, environ
 from PIL import Image
 from skimage.transform import resize
 from sklearn.model_selection import train_test_split
@@ -29,9 +29,10 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagstr_to_binary, TAGS, TAGS_short
+from planet.utils.data_utils import tagstr_to_binary, TAGS, TAGS_short, correct_tags
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
+from planet.utils.multi_gpu import make_parallel
 
 
 def rename(newname):
@@ -78,10 +79,10 @@ class Godard(object):
         logger = logging.getLogger(funcname())
 
         inputs = Input(shape=self.config['input_shape'])
-        x = BatchNormalization(axis=3)(inputs)
 
         def conv_block(nb_filters, prop_dropout, x):
             ki = 'he_uniform'
+            x = BatchNormalization(axis=3)(x)
             x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
             x = PReLU()(x)
             x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
@@ -90,7 +91,7 @@ class Godard(object):
             x = Dropout(prop_dropout)(x)
             return x
 
-        x = conv_block(32, 0.1, x)
+        x = conv_block(32, 0.1, inputs)
         x = conv_block(64, 0.2, x)
         x = conv_block(128, 0.3, x)
         x = conv_block(256, 0.3, x)
@@ -141,11 +142,12 @@ class Godard(object):
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
         def logloss(yt, yp):
-            wfn = 6.  # Weight false negative errors.
+            wfn = 8.  # Weight false negative errors.
             wfp = 1.  # Weight false positive errors.
             wmult = (yt * wfn) + (K.abs(yt - 1) * wfp)
             errors = yt * K.log(yp + 1e-7) + ((1 - yt) * K.log(1 - yp + 1e-7))
-            return -1 * K.mean(errors * wmult)
+            wlogloss = errors * wmult
+            return -1 * K.mean(wlogloss)
 
         # Generate an F2 metric for each tag.
         tf2_metrics = []
@@ -162,6 +164,10 @@ class Godard(object):
             def tagcnt(yt, yp, i=i):
                 return K.sum(yt[:, i])
             tcnt_metrics.append(tagcnt)
+
+        if 'CUDA_VISIBLE_DEVICES' in environ and ',' in environ["CUDA_VISIBLE_DEVICES"]:
+            nb_gpus = len(environ["CUDA_VISIBLE_DEVICES"].split(','))
+            self.net = make_parallel(self.net, nb_gpus)
 
         self.net.compile(optimizer=Adam(0.002),
                          metrics=[F2, prec, reca, myt, myp] + tf2_metrics + tcnt_metrics,
@@ -204,7 +210,7 @@ class Godard(object):
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalF2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
-            ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=10,
+            ReduceLROnPlateau(monitor='val_F2', factor=0.75, patience=10,
                               min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
             EarlyStopping(monitor='val_F2', patience=30, verbose=1, mode='max')
         ]
@@ -231,12 +237,17 @@ class Godard(object):
             lambda x: np.fliplr(x)
         ]
 
+        # Mapping from tag indexes to image indexes.
+        tidx_to_iidx = [[] for _ in range(len(TAGS))]
+        for iidx, t in enumerate(tags):
+            for tidx in np.where(t == 1)[0]:
+                tidx_to_iidx[tidx].append(iidx)
+
         while True:
 
             # Shuffled cycle image indexes for consecutive sampling.
             rng.shuffle(iidxs)
             iidxs_cycle = cycle(iidxs)
-            iidxs_sampled = []
 
             for _ in range(nb_steps):
 
@@ -244,20 +255,17 @@ class Godard(object):
                 tbatch = np.zeros(tbatch_shape, dtype=np.uint8)
 
                 for bidx in range(self.config['batch_size_trn']):
-                    iidx = next(iidxs_cycle)
-                    ibatch[bidx] = self.img_path_to_img(paths[iidx])
+                    iidx = rng.choice(tidx_to_iidx[bidx]) if bidx < len(TAGS) else next(iidxs_cycle)
+                    ibatch[bidx] = self.img_path_to_img(paths[iidx], cache=self.config['cache_imgs'])
                     tbatch[bidx] = tags[iidx]
                     for aug in rng.choice(aug_funcs, nb_augment_max):
                         ibatch[bidx] = aug(ibatch[bidx])
-                    iidxs_sampled.append(iidx)
 
                 yield ibatch, tbatch
 
-            assert set(iidxs_sampled) == set(iidxs)
+    def img_path_to_img(self, img_path, cache=False):
 
-    def img_path_to_img(self, img_path):
-
-        if self.config['cache_imgs'] and img_path in self.imgs_cache:
+        if cache and img_path in self.imgs_cache:
             return self.imgs_cache[img_path]
 
         if self.config['img_ext'] == 'jpg':
@@ -278,9 +286,9 @@ class Godard(object):
 
     def predict(self, imgs_names):
 
-        imgs_dir = self.config['trn_imgs_dir'] if 'train' in imgs_names[0] else self.config['tst_imgs_dir']
+        imgs_dir = self.config['imgs_dir_trn'] if 'train' in imgs_names[0] else self.config['imgs_dir_tst']
         imgs_paths = ['%s/%s.%s' % (imgs_dir, name, self.config['img_ext']) for name in imgs_names]
-        shape = [len(imgs_names), ] + self.config['input_shape']
+        shape = (len(imgs_names), ) + self.config['input_shape']
         imgs_batch = np.zeros(shape, dtype=np.float32)
 
         for bidx, img_path in enumerate(imgs_paths):

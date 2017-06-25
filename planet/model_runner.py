@@ -62,7 +62,7 @@ def model_runner(model):
         model.train()
 
     elif args['which'] == 'predict' and args['dataset'] == 'train':
-        df = pd.read_csv(model.config['trn_imgs_csv'])
+        df = pd.read_csv(model.config['imgs_csv_trn'])
         prec_scores, reca_scores, F2_scores = [], [], []
 
         # Reading images, making predictions in batches, tracking F2 scores.
@@ -89,7 +89,7 @@ def model_runner(model):
         logger.info('F2 final = %lf' % np.mean(F2_scores))
 
     elif args['which'] == 'predict' and args['dataset'] == 'test':
-        df = pd.read_csv(model.config['tst_imgs_csv'])
+        df = pd.read_csv(model.config['imgs_csv_tst'])
         submission_rows = []
         sub_path = '%s/submission_%s.csv' % (model.cpdir, str(int(time())))
 
