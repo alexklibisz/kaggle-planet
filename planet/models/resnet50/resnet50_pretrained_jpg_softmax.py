@@ -10,8 +10,9 @@ from itertools import cycle
 from keras.optimizers import Adam
 from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
+from keras.layers.advanced_activations import PReLU
 from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LambdaCallback
 from keras.losses import kullback_leibler_divergence as KLD
 from keras.applications import resnet50
 from math import ceil
@@ -27,7 +28,7 @@ from scipy.misc import imread
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagstr_to_ints, onehot_to_taglist, TAGS, onehot_F2, random_transforms
+from planet.utils.data_utils import tagstr_to_ints, onehot_to_taglist, TAGS, TAGS_short, onehot_F2, random_transforms
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
 
@@ -64,16 +65,15 @@ class ResNet50_softmax(object):
         return cpdir
 
     def create_net(self, weights_path=None):
-        if tuple(self.config['input_shape']) != (224, 224, 3):
-            print("ResNet50 has special restrictions on the input shape. Only remove this sys.exit call if you know what you're doing.")
-            sys.exit(1)
 
+        # ResNet50 setup as a big feature extractor.
         inputs = Input(shape=self.config['input_shape'])
         res = resnet50.ResNet50(include_top=False, input_tensor=inputs, weights='imagenet')
 
         # Add a classifier for each class instead of a single classifier.
         x = Flatten()(res.output)
-        shared_out = Dropout(0.1)(x)
+        x = PReLU()(x)
+        shared_out = Dropout(0.3)(x)
         classifiers = []
         for n in range(17):
             classifiers.append(Dense(2, activation='softmax')(shared_out))
@@ -110,7 +110,30 @@ class ResNet50_softmax(object):
             errors = yt * K.log(yp + 1e-7) + ((1 - yt) * K.log(1 - yp + 1e-7))
             return -1 * K.mean(errors * wmult)
 
-        self.net.compile(optimizer=Adam(0.001), metrics=[F2, prec, reca], loss=logloss)
+        # Decorator for procedurally generating functions with different names.
+        def rename(newname):
+            def decorator(f):
+                f.__name__ = newname
+                return f
+            return decorator
+
+        # Generate an F2 metric for each tag.
+        tf2_metrics = []
+        for i, t in enumerate(TAGS_short):
+            @rename('F2_%s' % t)
+            def tagF2(yt, yp, i=i):
+                return F2(yt[:, i], yp[:, i])
+            tf2_metrics.append(tagF2)
+
+        # Generate a metric for each tag that tracks how often it occurs in a batch.
+        tcnt_metrics = []
+        for i, t in enumerate(TAGS_short):
+            @rename('cnt_%s' % t)
+            def tagcnt(yt, yp, i=i):
+                return K.sum(yt[:, i])
+            tcnt_metrics.append(tagcnt)
+
+        self.net.compile(optimizer=Adam(0.001), metrics=[F2, prec, reca] + tf2_metrics + tcnt_metrics, loss=logloss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
@@ -119,16 +142,29 @@ class ResNet50_softmax(object):
 
     def train(self):
 
+        logger = logging.getLogger(funcname())
         rng = np.random
+
         imgs_idxs = np.arange(len(listdir(self.config['trn_imgs_dir'])))
         imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
         imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
         imgs_idxs_val = imgs_idxs[-int(len(imgs_idxs) * self.config['trn_prop_val']):]
         gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn,
-                                 self.config['trn_transform'])
+                                 transform=self.config['trn_transform'], balanced=True)
         gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val, False)
 
+        def print_tag_F2_metrics(epoch, logs):
+
+            for tag in TAGS_short:
+                f2_trn = logs['F2_%s' % tag]
+                f2_val = logs['val_F2_%s' % tag]
+                cnt_trn = logs['cnt_%s' % tag]
+                cnt_val = logs['val_cnt_%s' % tag]
+                logger.info('%-6s F2 trn=%-6.3lf cnt=%-6.2lf F2 val=%-6.3lf cnt=%-6.2lf' %
+                            (tag, f2_trn, cnt_trn, f2_val, cnt_val))
+
         cb = [
+            LambdaCallback(on_epoch_end=print_tag_F2_metrics),
             HistoryPlot('%s/history.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/weights_val_F2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
@@ -146,35 +182,59 @@ class ResNet50_softmax(object):
                                workers=3, pickle_safe=True,
                                validation_data=gen_val, validation_steps=nb_steps_val)
 
-    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, transform=False):
+    def batch_gen(self, imgs_csv, imgs_dir, img_idxs, transform=False, balanced=False):
 
+        # Helpers.
         rng = np.random
-        nb_steps = ceil(len(imgs_idxs) * 1. / self.config['batch_size_trn'])
+        shuffle = lambda x: rng.choice(x, len(x))
 
-        # Read the CSV and extract image names and tags.
-        df = pd.read_csv(imgs_csv)
-        imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
-        tag_set_ints = [tagstr_to_ints(ts) for ts in df['tags'].values]
-
+        # Constants.
+        nb_steps = ceil(len(img_idxs) / self.config['batch_size_trn'])
         img_batch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
         tag_batch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
 
+        # Read the CSV and extract image paths and tags.
+        df = pd.read_csv(imgs_csv)
+        img_pths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
+        img_tags = [tagstr_to_ints(tstr) for tstr in df['tags'].values]
+
+        # Mapping from tag to image indexes.
+        tags_to_img_idxs = [[] for _ in range(len(TAGS))]
+        for img_idx, tags in enumerate(img_tags):
+            pos_tags, = np.where(tags == 1.)
+            for t in pos_tags:
+                tags_to_img_idxs[t].append(img_idx)
+
+        # Convert to cycles for sequential sampling.
+        for i in range(len(TAGS)):
+            tags_to_img_idxs[i] = cycle(shuffle(tags_to_img_idxs[i]))
+
+        # Cycle on image indexes for consecutive sampling (when balanced = False).
+        img_idxs_cycle = cycle(img_idxs)
+
         while True:
 
-            # Shuffle all the given images and make one complete pass through them before re-shuffling.
-            _imgs_idxs = cycle(rng.choice(imgs_idxs, len(imgs_idxs)))
+            # Shuffle order of tags for balanced sampling.
+            tag_idxs = cycle(shuffle(np.arange(len(TAGS))))
+
             for _ in range(nb_steps):
 
                 imgs_batch = np.zeros(img_batch_shape, dtype=np.float32)
                 tags_batch = np.zeros(tag_batch_shape, dtype=np.uint8)
 
                 for batch_idx in range(self.config['batch_size_trn']):
-                    img_idx = next(_imgs_idxs)
-                    img = self.img_path_to_img(imgs_paths[img_idx])
+
+                    if balanced:
+                        tag_idx = next(tag_idxs)
+                        img_idx = next(tags_to_img_idxs[tag_idx])
+                    else:
+                        img_idx = next(img_idxs_cycle)
+
+                    imgs_batch[batch_idx] = self.img_path_to_img(img_pths[img_idx])
+                    tags_batch[batch_idx] = img_tags[img_idx]
+
                     if transform:
-                        img = random_transforms(img, nb_min=0, nb_max=4)
-                    imgs_batch[batch_idx] = img
-                    tags_batch[batch_idx] = tag_set_ints[img_idx]
+                        imgs_batch[batch_idx] = random_transforms(imgs_batch[batch_idx], 0, 4)
 
                 yield imgs_batch, tags_batch
 

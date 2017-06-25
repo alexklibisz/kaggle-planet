@@ -4,6 +4,7 @@ import numpy as np
 import tensorflow as tf
 np.random.seed(317)
 tf.set_random_seed(318)
+rng = np.random
 
 from glob import glob
 from itertools import cycle
@@ -16,6 +17,7 @@ from keras.layers.advanced_activations import PReLU
 from math import ceil
 from os import path, mkdir, listdir
 from PIL import Image
+from sklearn.model_selection import train_test_split
 from time import time
 import logging
 import keras.backend as K
@@ -26,9 +28,17 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagstr_to_binary, random_transforms, TAGS, TAGS_short, correct_tags
+from planet.utils.data_utils import tagstr_to_binary, TAGS, TAGS_short
 from planet.utils.keras_utils import HistoryPlot
 from planet.utils.runtime import funcname
+
+
+def rename(newname):
+    '''Decorator for procedurally generating functions with different names.'''
+    def decorator(f):
+        f.__name__ = newname
+        return f
+    return decorator
 
 
 class Godard(object):
@@ -40,24 +50,22 @@ class Godard(object):
             'output_shape': [17],
             'batch_size_tst': 2000,
             'batch_size_trn': 64,
-            'trn_nb_epochs': 300,
-            'trn_transform': True,
-            'trn_imgs_csv': 'data/train_v2.csv',
-            'trn_imgs_dir': 'data/train-jpg',
-            'tst_imgs_csv': 'data/sample_submission_v2.csv',
-            'tst_imgs_dir': 'data/test-jpg',
-            'img_ext': 'jpg',
-            'trn_prop_trn': 0.8,
-            'trn_prop_val': 0.2
+            'nb_epochs': 300,
+            'nb_augment_max': 10,
+            'prop_val': 0.2,
+            'imgs_csv_trn': 'data/train_v2.csv',
+            'imgs_dir_trn': 'data/train-jpg',
+            'imgs_csv_tst': 'data/sample_submission_v2.csv',
+            'imgs_dir_tst': 'data/test-jpg',
+            'imgs_ext': 'jpg',
+            'cpname': checkpoint_name
         }
 
-        self.checkpoint_name = checkpoint_name
         self.net = None
-        self.rng = np.random
 
     @property
     def cpdir(self):
-        cpdir = 'checkpoints/%s_%s/' % (self.checkpoint_name, '_'.join([str(x) for x in self.config['input_shape']]))
+        cpdir = 'checkpoints/%s_%s/' % (self.config['cpname'], '_'.join([str(x) for x in self.config['input_shape']]))
         if not path.exists(cpdir):
             mkdir(cpdir)
         return cpdir
@@ -67,8 +75,7 @@ class Godard(object):
         logger = logging.getLogger(funcname())
 
         inputs = Input(shape=self.config['input_shape'])
-
-        x = BatchNormalization(axis=3)(inputs)
+        x = inputs
 
         def conv_block(nb_filters, prop_dropout, x):
             ki = 'he_uniform'
@@ -131,23 +138,11 @@ class Godard(object):
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
         def logloss(yt, yp):
-            wfn = 8.  # Weight false negative errors.
+            wfn = 6.  # Weight false negative errors.
             wfp = 1.  # Weight false positive errors.
             wmult = (yt * wfn) + (K.abs(yt - 1) * wfp)
             errors = yt * K.log(yp + 1e-7) + ((1 - yt) * K.log(1 - yp + 1e-7))
             return -1 * K.mean(errors * wmult)
-
-        def acc(yt, yp):
-            nbwrong = K.sum(K.abs(yt - K.round(yp)))
-            size = K.sum(K.ones_like(yt))
-            return (size - nbwrong) / size
-
-        # Decorator for procedurally generating functions with different names.
-        def rename(newname):
-            def decorator(f):
-                f.__name__ = newname
-                return f
-            return decorator
 
         # Generate an F2 metric for each tag.
         tf2_metrics = []
@@ -178,17 +173,17 @@ class Godard(object):
     def train(self):
 
         logger = logging.getLogger(funcname())
-        rng = np.random
 
-        imgs_idxs = np.arange(len(listdir(self.config['trn_imgs_dir'])))
-        rng.shuffle(imgs_idxs)
-        imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
-        imgs_idxs_val = imgs_idxs[-int(len(imgs_idxs) * self.config['trn_prop_val']):]
+        # Data setup.
+        iidxs = np.arange(len(listdir(self.config['imgs_dir_trn'])))
+        iidxs_trn, iidxs_val = train_test_split(iidxs, test_size=self.config['prop_val'], random_state=rng)
+        steps_trn = ceil(len(iidxs_trn) / self.config['batch_size_trn'])
+        steps_val = ceil(len(iidxs_val) / self.config['batch_size_trn'])
+        assert len(set(iidxs_trn).intersection(iidxs_val)) == 0
+        assert steps_val < steps_trn
 
-        gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn,
-                                 transform=self.config['trn_transform'])
-        gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val,
-                                 transform=False)
+        gen_trn = self.batch_gen(iidxs_trn, steps_trn, nb_augment_max=self.config['nb_augment_max'])
+        gen_val = self.batch_gen(iidxs_val, steps_val, nb_augment_max=1)
 
         def print_tag_F2_metrics(epoch, logs):
 
@@ -204,66 +199,59 @@ class Godard(object):
             LambdaCallback(on_epoch_end=print_tag_F2_metrics),
             HistoryPlot('%s/history.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/weights_val_F2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
+            ModelCheckpoint('%s/wvalF2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
             ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=10,
                               min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
             EarlyStopping(monitor='val_F2', patience=30, verbose=1, mode='max')
         ]
 
-        nb_steps_trn = ceil(len(imgs_idxs_trn) / self.config['batch_size_trn'])
-        nb_steps_val = ceil(len(imgs_idxs_val) / self.config['batch_size_trn'])
-
-        self.net.fit_generator(gen_trn, steps_per_epoch=nb_steps_trn, epochs=self.config['trn_nb_epochs'],
+        self.net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.config['nb_epochs'],
                                verbose=1, callbacks=cb,
                                workers=3, pickle_safe=True,
-                               validation_data=gen_val, validation_steps=nb_steps_val)
+                               validation_data=gen_val, validation_steps=steps_val)
 
-    def batch_gen(self, imgs_csv, imgs_dir, img_idxs, transform=False):
-
-        # Helpers.
-        rng = np.random
-        shuffle = lambda x: rng.choice(x, len(x))
+    def batch_gen(self, iidxs, nb_steps=100, nb_augment_max=0):
 
         # Constants.
-        nb_steps = ceil(len(img_idxs) / self.config['batch_size_trn'])
-        img_batch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
-        tag_batch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
+        ibatch_shape = [self.config['batch_size_trn'], ] + self.config['input_shape']
+        tbatch_shape = [self.config['batch_size_trn'], ] + self.config['output_shape']
 
         # Read the CSV and extract image paths and tags.
-        df = pd.read_csv(imgs_csv)
-        img_pths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
-        img_tags = [tagstr_to_binary(tstr) for tstr in df['tags'].values]
+        df = pd.read_csv(self.config['imgs_csv_trn'])
+        paths = ['%s/%s.jpg' % (self.config['imgs_dir_trn'], n) for n in df['image_name'].values]
+        tags = [tagstr_to_binary(ts) for ts in df['tags'].values]
 
-        # Mapping from tag to image indexes.
-        tags_to_img_idxs = [[] for _ in range(len(TAGS))]
-        for img_idx, tags in enumerate(img_tags):
-            pos_tags, = np.where(tags == 1.)
-            for t in pos_tags:
-                tags_to_img_idxs[t].append(img_idx)
-
-        # Convert to cycles.
-        for i in range(len(TAGS)):
-            tags_to_img_idxs[i] = cycle(tags_to_img_idxs[i])
+        aug_funcs = [
+            lambda x: x,
+            lambda x: np.rot90(x, k=rng.randint(1, 4), axes=(0, 1)),
+            lambda x: np.flipud(x),
+            lambda x: np.fliplr(x)
+        ]
 
         while True:
 
             # Shuffled cycle image indexes for consecutive sampling.
-            img_idxs_cycle = cycle(shuffle(img_idxs))
+            rng.shuffle(iidxs)
+            iidxs_cycle = cycle(iidxs)
+            iidxs_sampled = []
 
             for _ in range(nb_steps):
 
-                imgs_batch = np.zeros(img_batch_shape, dtype=np.float32)
-                tags_batch = np.zeros(tag_batch_shape, dtype=np.uint8)
+                ibatch = np.zeros(ibatch_shape, dtype=np.float32)
+                tbatch = np.zeros(tbatch_shape, dtype=np.uint8)
 
                 for bidx in range(self.config['batch_size_trn']):
-                    iidx = next(tags_to_img_idxs[bidx]) if bidx < len(TAGS) else next(img_idxs_cycle)
-                    imgs_batch[bidx] = self.img_path_to_img(img_pths[iidx])
-                    tags_batch[bidx] = img_tags[iidx]
-                    if transform:
-                        imgs_batch[bidx] = random_transforms(imgs_batch[bidx], 0, 4)
+                    iidx = next(iidxs_cycle)
+                    ibatch[bidx] = self.img_path_to_img(paths[iidx])
+                    tbatch[bidx] = tags[iidx]
+                    for aug in rng.choice(aug_funcs, nb_augment_max):
+                        ibatch[bidx] = aug(ibatch[bidx])
+                    iidxs_sampled.append(iidx)
 
-                yield imgs_batch, tags_batch
+                yield ibatch, tbatch
+
+            assert set(iidxs_sampled) == set(iidxs)
 
     def img_path_to_img(self, img_path):
         img = Image.open(img_path).convert('RGB')

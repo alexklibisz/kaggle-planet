@@ -19,10 +19,10 @@ def model_runner(model):
     assert 'batch_size_trn' in model.config
     assert 'batch_size_tst' in model.config
     assert 'input_shape' in model.config
-    assert 'trn_imgs_dir' in model.config
-    assert 'trn_imgs_csv' in model.config
-    assert 'tst_imgs_dir' in model.config
-    assert 'tst_imgs_csv' in model.config
+    assert 'imgs_dir_trn' in model.config
+    assert 'imgs_csv_trn' in model.config
+    assert 'imgs_dir_tst' in model.config
+    assert 'imgs_csv_tst' in model.config
 
     logging.basicConfig(level=logging.INFO)
     model_name = type(model).__name__
