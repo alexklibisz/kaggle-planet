@@ -56,21 +56,21 @@ class Godard(object):
             'cpname': checkpoint_name,
             'cache_imgs': True,
 
-            # # TIF config.
-            # 'input_shape': (64, 64, 4),
-            # 'imgs_csv_trn': 'data/train_v2.csv',
-            # 'imgs_dir_trn': 'data/train-tif-v2',
-            # 'imgs_csv_tst': 'data/sample_submission_v2.csv',
-            # 'imgs_dir_tst': 'data/test-tif-v2',
-            # 'img_ext': 'tif',
-
-            # JPG config.
-            'input_shape': (64, 64, 3),
+            # TIF config.
+            'input_shape': (64, 64, 4),
             'imgs_csv_trn': 'data/train_v2.csv',
-            'imgs_dir_trn': 'data/train-jpg',
+            'imgs_dir_trn': 'data/train-tif-v2',
             'imgs_csv_tst': 'data/sample_submission_v2.csv',
-            'imgs_dir_tst': 'data/test-jpg',
-            'img_ext': 'jpg',
+            'imgs_dir_tst': 'data/test-tif-v2',
+            'img_ext': 'tif',
+
+            # # JPG config.
+            # 'input_shape': (64, 64, 3),
+            # 'imgs_csv_trn': 'data/train_v2.csv',
+            # 'imgs_dir_trn': 'data/train-jpg',
+            # 'imgs_csv_tst': 'data/sample_submission_v2.csv',
+            # 'imgs_dir_tst': 'data/test-jpg',
+            # 'img_ext': 'jpg',
 
         }
 
@@ -82,8 +82,9 @@ class Godard(object):
                          'bare_ground', 'blooming', 'blow_down', 'conventional_mine',
                          'cultivation', 'habitation', 'primary', 'road',
                          'selective_logging', 'slash_burn', 'water']
+        self.TAG_idxs_to_net = [TAGS.index(t) for t in self.TAGS_net]
+        self.TAG_idxs_from_net = [self.TAGS_net.index(t) for t in TAGS]
         self.TAGS_net_short = [t[:4] for t in self.TAGS_net]
-        self.TAG_idxs_net = [self.TAGS_net.index(t) for t in TAGS]
 
     @property
     def cpdir(self):
@@ -172,10 +173,11 @@ class Godard(object):
             mult = K.clip(K.sum(ypr, axis=1, keepdims=True) * ytc[:, 1:2], 1, 13)
             return mult
 
-        def clouderrors(yt, yp):
+        def cloudyerrors(yt, yp):
+            '''Number of samples per batch with cloudy tag errors.'''
             ytc = yt[:, :4]
             ypr = yp[:, 4:]
-            x = K.clip(K.sum(ypr, axis=1), 0, 1) * ytc[:, 1]
+            x = K.round(K.max(ypr, axis=1)) * ytc[:, 1]
             return K.sum(x)
 
         def combined_loss(yt, yp):
@@ -191,6 +193,9 @@ class Godard(object):
 
             # Return a single scalar.
             return K.mean(lc * cm) + K.mean(lr * cm)
+
+        def ccsum(yt, yp):
+            return K.mean(K.sum(yp[:, :4], axis=1))
 
         # Generate an F2 metric for each tag.
         tf2_metrics = []
@@ -208,8 +213,8 @@ class Godard(object):
                 return K.sum(yt[:, i])
             tcnt_metrics.append(tagcnt)
 
-        self.net.compile(optimizer=Adam(0.003),
-                         metrics=[test, F2, prec, reca, clouderrors] + tf2_metrics + tcnt_metrics,
+        self.net.compile(optimizer=Adam(0.0022),
+                         metrics=[F2, prec, reca, cloudyerrors, ccsum] + tf2_metrics + tcnt_metrics,
                          loss=combined_loss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
@@ -269,8 +274,8 @@ class Godard(object):
         paths = ['%s/%s.%s' % (self.config['imgs_dir_trn'], n, self.config['img_ext']) for n in df['image_name'].values]
         tags = [tagstr_to_binary(ts) for ts in df['tags'].values]
 
-        # Re-order tags such that cloud cover tags are in front.
-        tags = [t[self.TAG_idxs_net] for t in tags]
+        # Re-order tags to match network order.
+        tags = [t[self.TAG_idxs_to_net] for t in tags]
 
         aug_funcs = [
             lambda x: x,
@@ -317,7 +322,7 @@ class Godard(object):
 
         # Predict and convert ordering back to original.
         tags_pred = self.net.predict(imgs_batch)
-        tags_pred = tags_pred[:, self.TAG_idxs_net]
+        tags_pred = tags_pred[:, self.TAG_idxs_from_net]
 
         for i in range(len(tags_pred)):
             tags_pred[i] = correct_tags(tags_pred[i])
@@ -339,7 +344,7 @@ class Godard(object):
             img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
             img = img * 1. / (2.**16 - 1)
 
-        if self.config['cache_imgs']:
+        if cache:
             self.imgs_cache[img_path] = img
 
         return img
