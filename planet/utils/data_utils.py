@@ -28,22 +28,31 @@ TAGS = [
 
 TAGS_short = [t[:4] for t in TAGS]
 
+TAGS_idxs = {t: i for i, t in enumerate(TAGS)}
+
 
 def correct_tags(tags):
 
-    # "cloudy" nullifies all other predictions.
-    cloudy_idx = 6
-    if np.argmax(tags) == cloudy_idx:
-        tags *= 0
-        tags[cloudy_idx] = 1.
-
     # Pick the maximum cloud-cover and remove all others.
-    cc_idxs = [5, 6, 10, 11]
+    cc_idxs = [
+        TAGS_idxs['clear'],
+        TAGS_idxs['cloudy'],
+        TAGS_idxs['haze'],
+        TAGS_idxs['partly_cloudy']
+    ]
     cc_msk = np.zeros(len(TAGS), dtype=np.uint8)
     cc_msk[cc_idxs] = 1.
     cc_max_idx = np.argmax(tags * cc_msk)
     tags[cc_idxs] = 0.
     tags[cc_max_idx] = 1.
+    assert np.sum(tags[cc_idxs]) == 1.
+
+    # "cloudy" nullifies all other predictions.
+    cloudy_idx = TAGS_idxs['cloudy']
+    if cloudy_idx == cc_max_idx:
+        tags *= 0
+        tags[cloudy_idx] = 1.
+        assert np.sum(tags) == 1.
 
     return tags
 

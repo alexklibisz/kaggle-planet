@@ -48,20 +48,31 @@ class Godard(object):
     def __init__(self, checkpoint_name='godard_softmax'):
 
         self.config = {
-            'input_shape': (64, 64, 4),
             'output_shape': (17,),
             'batch_size_tst': 2000,
             'batch_size_trn': 64,
             'nb_epochs': 300,
             'nb_augment_max': 10,
             'prop_val': 0.2,
-            'imgs_csv_trn': 'data/train_v2.csv',
-            'imgs_dir_trn': 'data/train-tif-v2',
-            'imgs_csv_tst': 'data/sample_submission_v2.csv',
-            'imgs_dir_tst': 'data/test-tif-v2',
-            'img_ext': 'tif',
             'cpname': checkpoint_name,
-            'cache_imgs': True
+            'cache_imgs': True,
+
+            # # TIF config.
+            # 'input_shape': (64, 64, 4),
+            # 'imgs_csv_trn': 'data/train_v2.csv',
+            # 'imgs_dir_trn': 'data/train-tif-v2',
+            # 'imgs_csv_tst': 'data/sample_submission_v2.csv',
+            # 'imgs_dir_tst': 'data/test-tif-v2',
+            # 'img_ext': 'tif',
+
+            # JPG config.
+            'input_shape': (64, 64, 3),
+            'imgs_csv_trn': 'data/train_v2.csv',
+            'imgs_dir_trn': 'data/train-jpg',
+            'imgs_csv_tst': 'data/sample_submission_v2.csv',
+            'imgs_dir_tst': 'data/test-jpg',
+            'img_ext': 'jpg',
+
         }
 
         self.net = None
@@ -101,21 +112,32 @@ class Godard(object):
         x = Dense(1024)(x)
         x = PReLU()(x)
         x = Dropout(0.2)(x)
-        shared_out = x
+        features = x
 
-        # Individual softmax classifier for each class.
-        classifiers = []
-        for _ in range(17):
-            x = Dense(256)(shared_out)
+        # Single softmax classifier for the four cloud-cover classes.
+        x = BatchNormalization()(features)
+        x = Dense(256)(x)
+        x = PReLU()(x)
+        x = Dense(4, activation='softmax', name='out_cc')(x)
+        tc = x
+
+        # Individual softmax classifiers for remaining classes.
+        clsf_rest = []
+        for _ in range(13):
+            x = BatchNormalization()(features)
+            x = Dense(256)(x)
             x = PReLU()(x)
-            x = Dense(2, activation='softmax', name='output_%d' % _)(x)
-            classifiers.append(x)
+            x = Dense(2, activation='softmax', name='out_%d' % _)(x)
+            x = Lambda(lambda x: x[:, 1:])(x)
+            clsf_rest.append(x)
 
-        x = concatenate(classifiers, axis=-1)
-        x = Reshape((17, 2))(x)
-        x = Lambda(lambda x: x[:, :, 1])(x)
+        # Concatenate the rest of the tags and nullify them if cloudy was predicted.
+        tr = concatenate(clsf_rest, axis=-1)
 
-        self.net = Model(inputs=inputs, outputs=x)
+        # Combine tags into one tensor.
+        tags_comb = concatenate([tc, tr])
+
+        self.net = Model(inputs=inputs, outputs=tags_comb)
 
         def myt(yt, yp):
             return K.mean(yt)
@@ -141,13 +163,53 @@ class Godard(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        def logloss(yt, yp):
-            wfn = 8.  # Weight false negative errors.
-            wfp = 1.  # Weight false positive errors.
-            wmult = (yt * wfn) + (K.abs(yt - 1) * wfp)
-            errors = yt * K.log(yp + 1e-7) + ((1 - yt) * K.log(1 - yp + 1e-7))
-            wlogloss = errors * wmult
-            return -1 * K.mean(wlogloss)
+        def kldiv(yt, yp):
+            '''KL divergence for each example in batch.'''
+            yt = K.clip(yt, K.epsilon(), 1)
+            yp = K.clip(yp, K.epsilon(), 1)
+            return K.sum(yt * K.log(yt / yp), axis=1)
+
+        def wlogloss(yt, yp):
+            '''Weighted log loss for each example in batch.'''
+
+            # Weight false negative errors. This will decrease as recall increases.
+            meanpos = K.sum(yp * yt, axis=1, keepdims=True)
+            meanpos = meanpos / (K.sum(yt, axis=1, keepdims=True) + K.epsilon())
+            wfnmax = 10.
+            wfnmat = (1. - meanpos) * wfnmax
+            # wfnmat = -1 * K.log(meanpos + K.epsilon())
+
+            # Weight false positive errors.
+            wfpmax = 1.
+            wfp = wfpmax
+
+            wmat = (yt * wfnmat) + (K.abs(yt - 1) * wfp)
+            errmat = yt * K.log(yp + 1e-7) + ((1 - yt) * K.log(1 - yp + 1e-7))
+            return -1 * errmat * wmat
+
+        def cloudymult(ytc, ypr):
+            # Multiply the loss if the correct tag is cloudy and any other tags were predicted.
+            cloudy = K.cast(K.argmax(ytc, axis=1) == 1, 'float')
+            cloudymult = K.clip(K.sum(ypr, axis=1, keepdims=True) * cloudy, 1, 13)  # (b, 1)
+            return cloudymult
+
+        def cm(yt, yp):
+            cm = cloudymult(yt[:, :4], yp[:, 4:])
+            return K.mean(cm)
+
+        def combined_loss(yt, yp):
+
+            ytc = yt[:, :4]
+            ypc = yp[:, :4]
+            ytr = yt[:, 4:]
+            ypr = yp[:, 4:]
+
+            lc = kldiv(ytc, ypc)       # (b, 1)
+            lr = wlogloss(ytr, ypr)    # (b, 13)
+            # cm = cloudymult(ytc, ypr)  # (b, 13)
+            cm = 1.
+
+            return K.mean(lc) + K.mean(lr * cm)
 
         # Generate an F2 metric for each tag.
         tf2_metrics = []
@@ -165,13 +227,14 @@ class Godard(object):
                 return K.sum(yt[:, i])
             tcnt_metrics.append(tagcnt)
 
+        # Run on > 1 GPU in parallel. Just splits the batch across GPUs.
         if 'CUDA_VISIBLE_DEVICES' in environ and ',' in environ["CUDA_VISIBLE_DEVICES"]:
             nb_gpus = len(environ["CUDA_VISIBLE_DEVICES"].split(','))
             self.net = make_parallel(self.net, nb_gpus)
 
         self.net.compile(optimizer=Adam(0.002),
-                         metrics=[F2, prec, reca, myt, myp] + tf2_metrics + tcnt_metrics,
-                         loss=logloss)
+                         metrics=[F2, prec, reca, myt, myp, cm] + tf2_metrics + tcnt_metrics,
+                         loss=combined_loss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
@@ -230,6 +293,11 @@ class Godard(object):
         paths = ['%s/%s.%s' % (self.config['imgs_dir_trn'], n, self.config['img_ext']) for n in df['image_name'].values]
         tags = [tagstr_to_binary(ts) for ts in df['tags'].values]
 
+        # Re-order tags such that cloud cover tags are in front.
+        cidxs = [TAGS.index(s) for s in sorted(['clear', 'cloudy', 'haze', 'partly_cloudy'])]
+        ridxs = [i for i in range(len(TAGS)) if i not in cidxs]
+        tags = [np.hstack([t[cidxs], t[ridxs]]) for t in tags]
+
         aug_funcs = [
             lambda x: x,
             lambda x: np.rot90(x, k=rng.randint(1, 4), axes=(0, 1)),
@@ -263,27 +331,6 @@ class Godard(object):
 
                 yield ibatch, tbatch
 
-    def img_path_to_img(self, img_path, cache=False):
-
-        if cache and img_path in self.imgs_cache:
-            return self.imgs_cache[img_path]
-
-        if self.config['img_ext'] == 'jpg':
-            img = Image.open(img_path).convert('RGB')
-            img.thumbnail(self.config['input_shape'][:2])
-            img = np.asarray(img).astype(np.float16)
-            img /= 2.**8
-
-        elif self.config['img_ext'] == 'tif':
-            img = tif.imread(img_path).astype(np.float16)
-            img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
-            img /= 2.**16
-
-        if self.config['cache_imgs']:
-            self.imgs_cache[img_path] = img
-
-        return img
-
     def predict(self, imgs_names):
 
         imgs_dir = self.config['imgs_dir_trn'] if 'train' in imgs_names[0] else self.config['imgs_dir_tst']
@@ -294,11 +341,40 @@ class Godard(object):
         for bidx, img_path in enumerate(imgs_paths):
             imgs_batch[bidx] = self.img_path_to_img(img_path)
 
+        # Convert ordering back to original.
+        TAGS_net = ['clear', 'cloudy', 'haze', 'partly_cloudy', 'agriculture', 'artisinal_mine',
+                    'bare_ground', 'blooming', 'blow_down', 'conventional_mine',
+                    'cultivation', 'habitation', 'primary', 'road',
+                    'selective_logging', 'slash_burn', 'water']
+        idxs_net = [TAGS_net.index(t) for t in TAGS]
+
         tags_pred = self.net.predict(imgs_batch)
+        tags_pred = tags_pred[:, idxs_net]
+
         for i in range(len(tags_pred)):
             tags_pred[i] = correct_tags(tags_pred[i])
 
         return tags_pred.round().astype(np.uint8)
+
+    def img_path_to_img(self, img_path, cache=False):
+
+        if cache and img_path in self.imgs_cache:
+            return self.imgs_cache[img_path]
+
+        if self.config['img_ext'] == 'jpg':
+            img = Image.open(img_path).convert('RGB')
+            img.thumbnail(self.config['input_shape'][:2])
+            img = np.asarray(img) / (2.**8 - 1)
+
+        elif self.config['img_ext'] == 'tif':
+            img = tif.imread(img_path)
+            img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
+            img = img * 1. / (2.**16 - 1)
+
+        if self.config['cache_imgs']:
+            self.imgs_cache[img_path] = img
+
+        return img
 
     def visualize_activation(self):
 
@@ -317,7 +393,7 @@ class Godard(object):
             # overlay `filter_value` on top of the image.
             for idx in [1, 1, 1]:
                 img = visualize_activation(self.net, layer_idx, filter_indices=idx, max_iter=500)
-                img = utils.draw_text(img, TAGS[i])
+                # img = utils.draw_text(img, TAGS[i])
                 vis_images.append(img)
 
         # Generate stitched image palette with 8 cols.
