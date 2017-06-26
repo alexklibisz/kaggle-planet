@@ -6,6 +6,27 @@ import logging
 import numpy as np
 
 
+def prec(yt, yp):
+    yp = K.round(yp)
+    tp = K.sum(yt * yp)
+    fp = K.sum(K.clip(yp - yt, 0, 1))
+    return tp / (tp + fp + K.epsilon())
+
+
+def reca(yt, yp):
+    yp = K.round(yp)
+    tp = K.sum(yt * yp)
+    fn = K.sum(K.clip(yt - yp, 0, 1))
+    return tp / (tp + fn + K.epsilon())
+
+
+def F2(yt, yp):
+    p = prec(yt, yp)
+    r = reca(yt, yp)
+    b = 2.0
+    return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
+
+
 class HistoryPlot(Callback):
     '''Plots all of the metrics in a single figure and saves to the given file name. Plots the same metric's validation and training values on the same subplot for easy comparison and overfit monitoring.'''
 

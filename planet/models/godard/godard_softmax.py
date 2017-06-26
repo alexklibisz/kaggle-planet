@@ -30,9 +30,8 @@ import tifffile as tif
 import sys
 sys.path.append('.')
 from planet.utils.data_utils import tagstr_to_binary, TAGS, TAGS_short, correct_tags
-from planet.utils.keras_utils import HistoryPlot
+from planet.utils.keras_utils import HistoryPlot, prec, reca, F2
 from planet.utils.runtime import funcname
-from planet.utils.multi_gpu import make_parallel
 
 
 def rename(newname):
@@ -77,6 +76,14 @@ class Godard(object):
 
         self.net = None
         self.imgs_cache = {}
+
+        # Order of the tags output by the network.
+        self.TAGS_net = ['clear', 'cloudy', 'haze', 'partly_cloudy', 'agriculture', 'artisinal_mine',
+                         'bare_ground', 'blooming', 'blow_down', 'conventional_mine',
+                         'cultivation', 'habitation', 'primary', 'road',
+                         'selective_logging', 'slash_burn', 'water']
+        self.TAGS_net_short = [t[:4] for t in self.TAGS_net]
+        self.TAG_idxs_net = [self.TAGS_net.index(t) for t in TAGS]
 
     @property
     def cpdir(self):
@@ -139,30 +146,6 @@ class Godard(object):
 
         self.net = Model(inputs=inputs, outputs=tags_comb)
 
-        def myt(yt, yp):
-            return K.mean(yt)
-
-        def myp(yt, yp):
-            return K.mean(yp)
-
-        def prec(yt, yp):
-            yp = K.round(yp)
-            tp = K.sum(yt * yp)
-            fp = K.sum(K.clip(yp - yt, 0, 1))
-            return tp / (tp + fp + K.epsilon())
-
-        def reca(yt, yp):
-            yp = K.round(yp)
-            tp = K.sum(yt * yp)
-            fn = K.sum(K.clip(yt - yp, 0, 1))
-            return tp / (tp + fn + K.epsilon())
-
-        def F2(yt, yp):
-            p = prec(yt, yp)
-            r = reca(yt, yp)
-            b = 2.0
-            return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
-
         def kldiv(yt, yp):
             '''KL divergence for each example in batch.'''
             yt = K.clip(yt, K.epsilon(), 1)
@@ -172,48 +155,46 @@ class Godard(object):
         def wlogloss(yt, yp):
             '''Weighted log loss for each example in batch.'''
 
-            # Weight false negative errors. This will decrease as recall increases.
-            meanpos = K.sum(yp * yt, axis=1, keepdims=True)
-            meanpos = meanpos / (K.sum(yt, axis=1, keepdims=True) + K.epsilon())
-            wfnmax = 10.
-            wfnmat = (1. - meanpos) * wfnmax
-            # wfnmat = -1 * K.log(meanpos + K.epsilon())
+            # Weight false negative errors. This should decrease as recall increases.
+            meanpos = K.sum(yp * yt) / (K.sum(yt) + K.epsilon())
+            wfnmax = 20.
+            wfnmult = (1. - meanpos) * wfnmax
 
             # Weight false positive errors.
-            wfpmax = 1.
-            wfp = wfpmax
+            wfp = 1.
 
-            wmat = (yt * wfnmat) + (K.abs(yt - 1) * wfp)
-            errmat = yt * K.log(yp + 1e-7) + ((1 - yt) * K.log(1 - yp + 1e-7))
+            wmat = (yt * wfnmult) + (K.abs(yt - 1) * wfp)
+            errmat = yt * K.log(yp + K.epsilon()) + ((1 - yt) * K.log(1 - yp + K.epsilon()))
             return -1 * errmat * wmat
 
         def cloudymult(ytc, ypr):
-            # Multiply the loss if the correct tag is cloudy and any other tags were predicted.
-            cloudy = K.cast(K.argmax(ytc, axis=1) == 1, 'float')
-            cloudymult = K.clip(K.sum(ypr, axis=1, keepdims=True) * cloudy, 1, 13)  # (b, 1)
-            return cloudymult
+            '''Multiplier for cases where the cloudy tag is present but other tags are predicted.'''
+            mult = K.clip(K.sum(ypr, axis=1, keepdims=True) * ytc[:, 1:2], 1, 13)
+            return mult
 
-        def cm(yt, yp):
-            cm = cloudymult(yt[:, :4], yp[:, 4:])
-            return K.mean(cm)
+        def clouderrors(yt, yp):
+            ytc = yt[:, :4]
+            ypr = yp[:, 4:]
+            x = K.clip(K.sum(ypr, axis=1), 0, 1) * ytc[:, 1]
+            return K.sum(x)
 
         def combined_loss(yt, yp):
-
             ytc = yt[:, :4]
             ypc = yp[:, :4]
             ytr = yt[:, 4:]
             ypr = yp[:, 4:]
 
+            # Losses computed per example in the batch.
             lc = kldiv(ytc, ypc)       # (b, 1)
             lr = wlogloss(ytr, ypr)    # (b, 13)
-            # cm = cloudymult(ytc, ypr)  # (b, 13)
-            cm = 1.
+            cm = cloudymult(ytc, ypr)  # (b, 1)
 
-            return K.mean(lc) + K.mean(lr * cm)
+            # Return a single scalar.
+            return K.mean(lc * cm) + K.mean(lr * cm)
 
         # Generate an F2 metric for each tag.
         tf2_metrics = []
-        for i, t in enumerate(TAGS_short):
+        for i, t in enumerate(self.TAGS_net_short):
             @rename('F2_%s' % t)
             def tagF2(yt, yp, i=i):
                 return F2(yt[:, i], yp[:, i])
@@ -227,13 +208,8 @@ class Godard(object):
                 return K.sum(yt[:, i])
             tcnt_metrics.append(tagcnt)
 
-        # Run on > 1 GPU in parallel. Just splits the batch across GPUs.
-        if 'CUDA_VISIBLE_DEVICES' in environ and ',' in environ["CUDA_VISIBLE_DEVICES"]:
-            nb_gpus = len(environ["CUDA_VISIBLE_DEVICES"].split(','))
-            self.net = make_parallel(self.net, nb_gpus)
-
-        self.net.compile(optimizer=Adam(0.002),
-                         metrics=[F2, prec, reca, myt, myp, cm] + tf2_metrics + tcnt_metrics,
+        self.net.compile(optimizer=Adam(0.003),
+                         metrics=[test, F2, prec, reca, clouderrors] + tf2_metrics + tcnt_metrics,
                          loss=combined_loss)
         self.net.summary()
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
@@ -259,7 +235,7 @@ class Godard(object):
 
         def print_tag_F2_metrics(epoch, logs):
 
-            for tag in TAGS_short:
+            for tag in self.TAGS_net_short:
                 f2_trn = logs['F2_%s' % tag]
                 f2_val = logs['val_F2_%s' % tag]
                 cnt_trn = logs['cnt_%s' % tag]
@@ -294,9 +270,7 @@ class Godard(object):
         tags = [tagstr_to_binary(ts) for ts in df['tags'].values]
 
         # Re-order tags such that cloud cover tags are in front.
-        cidxs = [TAGS.index(s) for s in sorted(['clear', 'cloudy', 'haze', 'partly_cloudy'])]
-        ridxs = [i for i in range(len(TAGS)) if i not in cidxs]
-        tags = [np.hstack([t[cidxs], t[ridxs]]) for t in tags]
+        tags = [t[self.TAG_idxs_net] for t in tags]
 
         aug_funcs = [
             lambda x: x,
@@ -341,15 +315,9 @@ class Godard(object):
         for bidx, img_path in enumerate(imgs_paths):
             imgs_batch[bidx] = self.img_path_to_img(img_path)
 
-        # Convert ordering back to original.
-        TAGS_net = ['clear', 'cloudy', 'haze', 'partly_cloudy', 'agriculture', 'artisinal_mine',
-                    'bare_ground', 'blooming', 'blow_down', 'conventional_mine',
-                    'cultivation', 'habitation', 'primary', 'road',
-                    'selective_logging', 'slash_burn', 'water']
-        idxs_net = [TAGS_net.index(t) for t in TAGS]
-
+        # Predict and convert ordering back to original.
         tags_pred = self.net.predict(imgs_batch)
-        tags_pred = tags_pred[:, idxs_net]
+        tags_pred = tags_pred[:, self.TAG_idxs_net]
 
         for i in range(len(tags_pred)):
             tags_pred[i] = correct_tags(tags_pred[i])
