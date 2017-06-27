@@ -56,21 +56,21 @@ class Godard(object):
             'cpname': checkpoint_name,
             'cache_imgs': True,
 
-            # TIF config.
-            'input_shape': (64, 64, 4),
-            'imgs_csv_trn': 'data/train_v2.csv',
-            'imgs_dir_trn': 'data/train-tif-v2',
-            'imgs_csv_tst': 'data/sample_submission_v2.csv',
-            'imgs_dir_tst': 'data/test-tif-v2',
-            'img_ext': 'tif',
-
-            # # JPG config.
-            # 'input_shape': (64, 64, 3),
+            # # TIF config.
+            # 'input_shape': (64, 64, 4),
             # 'imgs_csv_trn': 'data/train_v2.csv',
-            # 'imgs_dir_trn': 'data/train-jpg',
+            # 'imgs_dir_trn': 'data/train-tif-v2',
             # 'imgs_csv_tst': 'data/sample_submission_v2.csv',
-            # 'imgs_dir_tst': 'data/test-jpg',
-            # 'img_ext': 'jpg',
+            # 'imgs_dir_tst': 'data/test-tif-v2',
+            # 'img_ext': 'tif',
+
+            # JPG config.
+            'input_shape': (100, 100, 3),
+            'imgs_csv_trn': 'data/train_v2.csv',
+            'imgs_dir_trn': 'data/train-jpg',
+            'imgs_csv_tst': 'data/sample_submission_v2.csv',
+            'imgs_dir_tst': 'data/test-jpg',
+            'img_ext': 'jpg',
 
         }
 
@@ -111,10 +111,10 @@ class Godard(object):
             return x
 
         x = conv_block(32, 0.1, inputs)
-        x = conv_block(64, 0.2, x)
-        x = conv_block(128, 0.3, x)
-        x = conv_block(256, 0.3, x)
-        x = conv_block(512, 0.3, x)
+        x = conv_block(64, 0.3, x)
+        x = conv_block(128, 0.5, x)
+        x = conv_block(256, 0.5, x)
+        x = conv_block(512, 0.5, x)
 
         x = Flatten()(x)
         x = Dense(1024)(x)
@@ -126,6 +126,7 @@ class Godard(object):
         x = BatchNormalization()(features)
         x = Dense(256)(x)
         x = PReLU()(x)
+        x = Dropout(0.2)(x)
         x = Dense(4, activation='softmax', name='out_cc')(x)
         tc = x
 
@@ -135,6 +136,7 @@ class Godard(object):
             x = BatchNormalization()(features)
             x = Dense(256)(x)
             x = PReLU()(x)
+            x = Dropout(0.2)(x)
             x = Dense(2, activation='softmax', name='out_%d' % _)(x)
             x = Lambda(lambda x: x[:, 1:])(x)
             clsf_rest.append(x)
@@ -331,23 +333,30 @@ class Godard(object):
 
     def img_path_to_img(self, img_path, cache=False):
 
-        if cache and img_path in self.imgs_cache:
-            return self.imgs_cache[img_path]
-
         if self.config['img_ext'] == 'jpg':
-            img = Image.open(img_path).convert('RGB')
-            img.thumbnail(self.config['input_shape'][:2])
-            img = np.asarray(img) / (2.**8 - 1)
 
-        elif self.config['img_ext'] == 'tif':
-            img = tif.imread(img_path)
-            img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
-            img = img * 1. / (2.**16 - 1)
+            if img_path in self.imgs_cache:
+                img = self.imgs_cache[img_path]
+            else:
+                img = Image.open(img_path).convert('RGB')
+                img.thumbnail(self.config['input_shape'][:2])
+                img = np.asarray(img, dtype=np.uint8)
+                if cache:
+                    self.imgs_cache[img_path] = img
 
-        if cache:
-            self.imgs_cache[img_path] = img
+            return img / 255. * 2. - 1.
 
-        return img
+        if self.config['img_ext'] == 'tif':
+
+            if img_path in self.imgs_cache:
+                img = self.imgs_cache[img_path]
+            else:
+                img = tif.imread(img_path)
+                img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
+                if cache:
+                    self.imgs_cache[img_path] = img.astype(np.uint16)
+
+            return img / (2.**16 - 1.) * 2. - 1.
 
     def visualize_activation(self):
 
