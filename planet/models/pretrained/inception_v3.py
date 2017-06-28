@@ -6,20 +6,21 @@ np.random.seed(317)
 tf.set_random_seed(318)
 rng = np.random
 
-from glob import glob
 from itertools import cycle
 from keras.optimizers import Adam
 from keras.models import Model
-from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
 from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LambdaCallback
+from keras.layers import Input, Dropout, BatchNormalization, Dense, Flatten, Lambda, concatenate
 from keras.layers.advanced_activations import PReLU
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LambdaCallback
 from math import ceil
+from keras.applications.inception_v3 import InceptionV3, preprocess_input
 from os import path, mkdir, listdir, environ
 from PIL import Image
 from skimage.transform import resize
 from sklearn.model_selection import train_test_split
 from time import time
+import gc
 import logging
 import keras.backend as K
 import pandas as pd
@@ -42,30 +43,22 @@ def rename(newname):
     return decorator
 
 
-class Godard(object):
+class Inception_V3(object):
 
-    def __init__(self, checkpoint_name='godard_softmax'):
+    def __init__(self, checkpoint_name='inception_v3'):
 
         self.config = {
             'output_shape': (17,),
-            'batch_size_tst': 2000,
-            'batch_size_trn': 64,
+            'batch_size_tst': 500,
+            'batch_size_trn': 40,
             'nb_epochs': 300,
             'nb_augment_max': 10,
             'prop_val': 0.2,
             'cpname': checkpoint_name,
-            'cache_imgs': True,
-
-            # # TIF config.
-            # 'input_shape': (64, 64, 4),
-            # 'imgs_csv_trn': 'data/train_v2.csv',
-            # 'imgs_dir_trn': 'data/train-tif-v2',
-            # 'imgs_csv_tst': 'data/sample_submission_v2.csv',
-            # 'imgs_dir_tst': 'data/test-tif-v2',
-            # 'img_ext': 'tif',
+            'cache_imgs': False,
 
             # JPG config.
-            'input_shape': (100, 100, 3),
+            'input_shape': (229, 229, 3),
             'imgs_csv_trn': 'data/train_v2.csv',
             'imgs_dir_trn': 'data/train-jpg',
             'imgs_csv_tst': 'data/sample_submission_v2.csv',
@@ -98,29 +91,8 @@ class Godard(object):
         logger = logging.getLogger(funcname())
 
         inputs = Input(shape=self.config['input_shape'])
-
-        def conv_block(nb_filters, prop_dropout, x):
-            ki = 'he_uniform'
-            x = BatchNormalization(axis=3)(x)
-            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
-            x = PReLU()(x)
-            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
-            x = PReLU()(x)
-            x = MaxPooling2D(pool_size=2)(x)
-            x = Dropout(prop_dropout)(x)
-            return x
-
-        x = conv_block(45, 0.1, inputs)
-        x = conv_block(90, 0.3, x)
-        x = conv_block(180, 0.5, x)
-        x = conv_block(360, 0.5, x)
-        x = conv_block(720, 0.5, x)
-
-        x = Flatten()(x)
-        x = Dense(1024)(x)
-        x = PReLU()(x)
-        x = Dropout(0.2)(x)
-        features = x
+        inception = InceptionV3(include_top=False, weights='imagenet', input_tensor=inputs, pooling='max')
+        features = Dropout(0.1)(inception.output)
 
         # Single softmax classifier for the four cloud-cover classes.
         x = BatchNormalization()(features)
@@ -215,7 +187,7 @@ class Godard(object):
                 return K.sum(yt[:, i])
             tcnt_metrics.append(tagcnt)
 
-        self.net.compile(optimizer=Adam(0.0022, decay=0.0001),
+        self.net.compile(optimizer=Adam(0.0007, decay=0.0001),
                          metrics=[F2, prec, reca, cloudyerrors, ccsum] + tf2_metrics + tcnt_metrics,
                          loss=combined_loss)
         self.net.summary()
@@ -297,6 +269,7 @@ class Godard(object):
             # Shuffled cycle image indexes for consecutive sampling.
             rng.shuffle(iidxs)
             iidxs_cycle = cycle(iidxs)
+            gc.collect()
 
             for _ in range(nb_steps):
 
@@ -333,30 +306,16 @@ class Godard(object):
 
     def img_path_to_img(self, img_path, cache=False):
 
-        if self.config['img_ext'] == 'jpg':
+        if img_path in self.imgs_cache:
+            img = self.imgs_cache[img_path]
+        else:
+            img = Image.open(img_path).convert('RGB')
+            img.thumbnail(self.config['input_shape'][:2])
+            img = np.asarray(img, dtype=np.uint8)
+            if cache:
+                self.imgs_cache[img_path] = img
 
-            if img_path in self.imgs_cache:
-                img = self.imgs_cache[img_path]
-            else:
-                img = Image.open(img_path).convert('RGB')
-                img.thumbnail(self.config['input_shape'][:2])
-                img = np.asarray(img, dtype=np.uint8)
-                if cache:
-                    self.imgs_cache[img_path] = img
-
-            return ((img / 255.) - 0.5) * 2.
-
-        if self.config['img_ext'] == 'tif':
-
-            if img_path in self.imgs_cache:
-                img = self.imgs_cache[img_path]
-            else:
-                img = tif.imread(img_path)
-                img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
-                if cache:
-                    self.imgs_cache[img_path] = img.astype(np.uint16)
-
-            return img / (2.**16 - 1.) * 2. - 1.
+        return ((img / 255.) - 0.5) * 2
 
     def visualize_activation(self):
 
@@ -387,4 +346,4 @@ class Godard(object):
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
-    model_runner(Godard())
+    model_runner(Inception_V3())
