@@ -57,6 +57,7 @@ def model_runner(model):
 
     # Create network before loading weights or training.
     model.create_net(args['weights'])
+    model.net.summary()
 
     if args['which'] == 'train':
         model.train()

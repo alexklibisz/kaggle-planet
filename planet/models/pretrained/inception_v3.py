@@ -1,5 +1,4 @@
 # Godard
-
 import numpy as np
 import tensorflow as tf
 np.random.seed(317)

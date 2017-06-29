@@ -1,4 +1,4 @@
-# Godard
+# Godard is back.
 
 import numpy as np
 import tensorflow as tf
@@ -10,10 +10,10 @@ from glob import glob
 from itertools import cycle
 from keras.optimizers import Adam
 from keras.models import Model
-from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
+from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LambdaCallback
-from keras.layers.advanced_activations import PReLU
+from keras.layers.advanced_activations import PReLU, ELU
 from math import ceil
 from os import path, mkdir, listdir, environ
 from PIL import Image
@@ -30,8 +30,8 @@ import tifffile as tif
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagstr_to_binary, TAGS, TAGS_short, correct_tags
-from planet.utils.keras_utils import HistoryPlotCB, ValidationCB, prec, reca, F2
+from planet.utils.data_utils import TAGS, TAGS_short, IMG_MEAN_JPG_TRN, tagstr_to_binary, correct_tags, tag_proportions
+from planet.utils.keras_utils import HistoryPlotCB, ValidationCB, ParamStatsCB, prec, reca, F2
 from planet.utils.runtime import funcname
 
 
@@ -48,7 +48,7 @@ class Godard(object):
             'cpname': checkpoint_name,
 
             # JPG config.
-            'input_shape': (64, 64, 3),
+            'input_shape': (150, 150, 3),
             'imgs_csv_trn': 'data/train_v2.csv',
             'imgs_dir_trn': 'data/train-jpg',
             'imgs_csv_tst': 'data/sample_submission_v2.csv',
@@ -76,39 +76,55 @@ class Godard(object):
 
         inputs = Input(shape=self.config['input_shape'])
 
+        # 2x Conv-batchnorm-prelu-dropout, maxpool
         def conv_block(nb_filters, prop_dropout, x):
-            ki = 'he_uniform'
-            x = BatchNormalization(axis=3)(x)
+            ki = 'he_normal'
             x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
-            x = PReLU()(x)
-            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
-            x = PReLU()(x)
-            x = MaxPooling2D(pool_size=2)(x)
+            x = BatchNormalization(momentum=0.5)(x)
+            x = ELU()(x)
             x = Dropout(prop_dropout)(x)
-            return x
+            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
+            x = BatchNormalization(momentum=0.5)(x)
+            x = ELU()(x)
+            x = Dropout(prop_dropout)(x)
+            return MaxPooling2D(pool_size=2)(x)
 
-        x = conv_block(45, 0.1, inputs)
-        x = conv_block(90, 0.3, x)
-        x = conv_block(180, 0.5, x)
-        x = conv_block(360, 0.5, x)
-        x = conv_block(720, 0.5, x)
+        # Conv/pooling layers.
+        x = conv_block(32, 0.1, inputs)
+        x = conv_block(64, 0.2, x)
+        x = conv_block(128, 0.3, x)
+        x = conv_block(256, 0.3, x)
+        x = conv_block(512, 0.3, x)
 
+        # Shared fully-connected layers.
+        # Dense-batchnorm-ELU-dropout
         x = Flatten()(x)
-        x = PReLU()(Dense(1024)(x))
-        x = Dropout(0.2)(x)
-        x = PReLU()(Dense(1024)(x))
-        x = BatchNormalization()(x)
-        x = Dropout(0.2)(x)
+        x = Dense(1024)(x)
+        x = BatchNormalization(momentum=0.5)(x)
+        x = ELU()(x)
+        x = Dropout(0.3)(x)
+        x = Dense(1024)(x)
+        x = BatchNormalization(momentum=0.5)(x)
+        x = ELU()(x)
+        x = Dropout(0.3)(x)
         shared = x
 
         # Single softmax classifier for the four cloud-cover tags.
-        x = PReLU()(Dense(256)(shared))
-        out_clds = Dense(4, activation='softmax', name='out_clds')(x)
+        # Dense-batchnorm-ELU-dense-batchnorm-classification
+        x = Dense(256)(shared)
+        x = BatchNormalization(momentum=0.5)(x)
+        x = ELU()(x)
+        x = Dense(4)(x)
+        x = BatchNormalization(momentum=0.5)(x)
+        out_clds = Activation('softmax', name='out_clds')(x)
 
         # Single sigmoid classifier for remaining tags.
-        x = PReLU()(Dense(256)(shared))
-        x = BatchNormalization()(x)
-        out_rest = Dense(13, activation='sigmoid', name='out_rest')(x)
+        # Dense-batchnorm-ELU-dense-batchnorm-classification
+        x = Dense(256)(shared)
+        x = ELU()(x)
+        x = Dense(13)(x)
+        x = BatchNormalization(momentum=0.5)(x)
+        out_rest = Activation('sigmoid', name='out_rest')(x)
 
         # Some surgery to combine outputs into one tensor and re-arrange them to
         # match the alphabetical tag ordering.
@@ -117,40 +133,65 @@ class Godard(object):
                     'habitation', 'primary', 'road', 'selective_logging', 'slash_burn', 'water']
         concat = concatenate([out_clds, out_rest])
         arranged = [Lambda(lambda x: K.expand_dims(x[:, TAGS_net.index(t)]))(concat) for t in TAGS]
-        out = concatenate(arranged)
+        out = concatenate(arranged, name='out_arranged')
 
         self.net = Model(inputs=inputs, outputs=out)
 
-        def loss(yt, yp):
+        # Most tags in the dataset have a strong class imbalance (way more
+        # negatives than positives or vice versa). With regular log-loss, there is
+        # incentive to predict the dominant class. To compensate for this, we
+        # up-weight the error for the non-dominant class and down-weight the error
+        # for the dominant class. This increases penalty for ignoring the
+        # non-dominant class and increases penalty for defaulting to the dominant
+        # class - approximating a 50/50 class balance.
+        ppos, pneg = tag_proportions()
+        wpos = np.ones_like(ppos) * 0.5 / ppos
+        wneg = np.ones_like(pneg) * 0.5 / pneg
 
-            # Clip to avoid NaN.
-            yt, yp = K.clip(yt, K.epsilon(), 1), K.clip(yp, K.epsilon(), 1)
+        def loss(yt, yp, wpos=K.variable(wpos), wneg=K.variable(wneg)):
+            # Log loss per tag per data point (b, c). Then compute and apply weight matrix.
+            loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))  # (b, c)
+            wmat = (yt * wpos) + (K.abs(yt - 1) * wneg)     # (b,c)
+            return K.mean(loss * wmat, axis=-1)             # (b,1)
 
-            # Mean binary crossentropy loss per tag per data point.
-            e = K.epsilon()
-            bcl = -1 * (yt * K.log(yp + e) + (1 - yt) * K.log(1 - yp + e))
-            return K.mean(bcl, axis=-1)
-
-            # TODO: clever weighting to compensate predicting all negative on low-probability
-            # classes, which leads to high precision, low recall.
-
-        self.net.compile(optimizer=Adam(0.0022, decay=1e-5), metrics=[F2, prec, reca], loss=loss)
-        self.net.summary()
+        self.net.compile(optimizer=Adam(0.002), metrics=[F2, prec, reca], loss=loss)
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
         if weights_path is not None:
             logger.info('Loading weights from %s' % weights_path)
             self.net.load_weights(weights_path)
 
+    # def train(self):
+
+    #     logger = logging.getLogger(funcname())
+
+    #     with open(self.config['trn_idxs_path'], 'rb') as f:
+    #         idxs_trn_ = pkl.load(f)
+
+    #     nbs = [10, 100, 500, 1000, 2500, 5000]
+    #     for nb in nbs:
+    #         self.net = None
+    #         self.create_net()
+    #         idxs_trn = rng.choice(idxs_trn_, nb)
+    #         steps_trn = ceil(len(idxs_trn) / self.config['batch_size_trn'])
+    #         gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.config['nb_augment_max'])
+    #         epochs = 100
+    #         history = self.net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=epochs, verbose=1)
+
+    #         with open('out.txt', 'a') as f:
+    #             s = 'nb = %d, max (f2, prec, reca) = (%.3lf,%.3lf,%.3lf)' % (nb, np.max(history.history['F2']),
+    #                                                                          np.max(history.history['prec']),
+    #                                                                          np.max(history.history['reca']))
+    #             f.write(s + '\n')
+    #             print(s)
+
     def train(self):
 
         logger = logging.getLogger(funcname())
 
         # Data setup.
-        with open(self.config['trn_idxs_path'], 'rb') as f:
-            idxs_trn = pkl.load(f)
-        with open(self.config['val_idxs_path'], 'rb') as f:
-            idxs_val = pkl.load(f)
+        idxs_trn = pkl.load(open(self.config['trn_idxs_path'], 'rb'))
+        idxs_val = pkl.load(open(self.config['val_idxs_path'], 'rb'))
         assert set(idxs_trn).intersection(idxs_val) == set([])
         steps_trn = ceil(len(idxs_trn) / self.config['batch_size_trn'])
         steps_val = ceil(len(idxs_val) / self.config['batch_size_trn'])
@@ -159,6 +200,7 @@ class Godard(object):
 
         cb = [
             ValidationCB(self.cpdir, gen_val, self.config['batch_size_trn'], steps_val),
+            ParamStatsCB(self.cpdir),
             HistoryPlotCB('%s/history.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalF2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
@@ -184,16 +226,10 @@ class Godard(object):
 
         aug_funcs = [
             lambda x: x,
-            lambda x: np.rot90(x, k=rng.randint(1, 4), axes=(0, 1)),
+            lambda x: np.rot90(x, k=rng.randint(1, 4)),
             lambda x: np.flipud(x),
             lambda x: np.fliplr(x)
         ]
-
-        # Mapping from tag indexes to image indexes.
-        tidx_to_iidx = [[] for _ in range(len(TAGS))]
-        for iidx, t in enumerate(tags):
-            for tidx in np.where(t == 1)[0]:
-                tidx_to_iidx[tidx].append(iidx)
 
         while True:
 
@@ -207,8 +243,8 @@ class Godard(object):
                 tbatch = np.zeros(tbatch_shape, dtype=np.uint8)
 
                 for bidx in range(self.config['batch_size_trn']):
-                    iidx = rng.choice(tidx_to_iidx[bidx]) if bidx < len(TAGS) else next(idxs_cycle)
-                    ibatch[bidx] = self.img_path_to_img(paths[iidx], cache=self.config['cache_imgs'])
+                    iidx = next(idxs_cycle)
+                    ibatch[bidx] = self.get_img(paths[iidx], cache=self.config['cache_imgs'])
                     tbatch[bidx] = tags[iidx]
                     for aug in rng.choice(aug_funcs, nb_augment_max):
                         ibatch[bidx] = aug(ibatch[bidx])
@@ -223,41 +259,34 @@ class Godard(object):
         imgs_batch = np.zeros(shape, dtype=np.float32)
 
         for bidx, img_path in enumerate(imgs_paths):
-            imgs_batch[bidx] = self.img_path_to_img(img_path)
+            imgs_batch[bidx] = self.get_img(img_path)
 
-        # Predict and correct.
         tags_pred = self.net.predict(imgs_batch)
         for i in range(len(tags_pred)):
             tags_pred[i] = correct_tags(tags_pred[i])
 
         return tags_pred.round().astype(np.uint8)
 
-    def img_path_to_img(self, img_path, cache=False):
+    def get_img(self, img_path, cache=False):
+        '''Optionally cache the images as uint8 arrays to save on memory.
+        Then pre-process each image after retrieving from cache or disk.'''
 
-        if self.config['img_ext'] == 'jpg':
+        if cache and img_path in self.imgs_cache:
+            img = self.imgs_cache[img_path]
+        else:
+            img = Image.open(img_path).convert('RGB')
+            img.thumbnail(self.config['input_shape'][:2])
+            img = np.asarray(img, dtype=np.uint8)
 
-            if img_path in self.imgs_cache:
-                img = self.imgs_cache[img_path]
-            else:
-                img = Image.open(img_path).convert('RGB')
-                img.thumbnail(self.config['input_shape'][:2])
-                img = np.asarray(img, dtype=np.uint8)
-                if cache:
-                    self.imgs_cache[img_path] = img
+        if cache and img_path not in self.imgs_cache:
+            self.imgs_cache[img_path] = img
 
-            return ((img / 255.) - 0.5) * 2.
+        # Scale to [0,1] and subtract mean per channel.
+        img = img.astype(np.float32) / 255.
+        for c in range(img.shape[-1]):
+            img[:, :, c] -= IMG_MEAN_JPG_TRN[c] / 255.
 
-        if self.config['img_ext'] == 'tif':
-
-            if img_path in self.imgs_cache:
-                img = self.imgs_cache[img_path]
-            else:
-                img = tif.imread(img_path)
-                img = resize(img, self.config['input_shape'], preserve_range=True, mode='constant')
-                if cache:
-                    self.imgs_cache[img_path] = img.astype(np.uint16)
-
-            return img / (2.**16 - 1.) * 2. - 1.
+        return img
 
     def visualize_activation(self):
 

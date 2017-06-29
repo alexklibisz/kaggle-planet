@@ -26,9 +26,23 @@ TAGS = [
     'slash_burn',               # 15
     'water']                    # 16
 
+# Abbreviations of tags.
 TAGS_short = [t[:4] for t in TAGS]
 
+# Lookup tag's index by its string value.
 TAGS_idxs = {t: i for i, t in enumerate(TAGS)}
+
+# Mean values per channel computed on train dataset.
+IMG_MEAN_JPG_TRN = (123.7213287353515625, 124.1055145263671875, 107.1297149658203125)
+IMG_MEAN_TIF_TRN = (5023.3525390625, 4288.53466796875, 2961.06689453125, 6369.85498046875)
+
+
+def tag_proportions(csvpath='data/train_v2.csv'):
+    df = pd.read_csv(csvpath)
+    t = np.vstack([tagstr_to_binary(ts) for ts in df['tags'].values])
+    ppos = np.sum(t, axis=0) / t.shape[0]
+    pneg = np.sum(np.abs(t - 1), axis=0) / t.shape[0]
+    return ppos, pneg
 
 
 def correct_tags(tags):
@@ -40,7 +54,7 @@ def correct_tags(tags):
         TAGS_idxs['haze'],
         TAGS_idxs['partly_cloudy']
     ]
-    cc_msk = np.zeros(len(TAGS), dtype=np.uint8)
+    cc_msk = np.zeros(len(TAGS), dtype=np.int8)
     cc_msk[cc_idxs] = 1.
     cc_max_idx = np.argmax(tags * cc_msk)
     tags[cc_idxs] = 0.
@@ -59,7 +73,7 @@ def correct_tags(tags):
 
 def tagstr_to_binary(tagstr):
     tagset = set(tagstr.strip().split(' '))
-    tags = np.zeros((len(TAGS)), dtype=np.uint8)
+    tags = np.zeros((len(TAGS)), dtype=np.int8)
     for idx, tag in enumerate(TAGS):
         if tag in tagset:
             tags[idx] = 1
@@ -104,26 +118,11 @@ def bool_F2(A, B):
     return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
 
 
-def random_transforms(img, nb_min=0, nb_max=2, rng=np.random):
+def val_plot_metrics(json_path):
 
-    transforms = [
-        lambda x: x,
-        lambda x: np.rot90(x, k=rng.randint(1, 4), axes=(0, 1)),
-        lambda x: np.flipud(x),
-        lambda x: np.fliplr(x),
-        # lambda x: np.roll(x, rng.randint(1, x.shape[0]), 0),
-        # lambda x: np.roll(x, rng.randint(1, x.shape[1]), 1),
-        # lambda x: sktf.rotate(x, angle=rng.randint(1, 360), preserve_range=True, mode='reflect'),
+    return
 
-        # # Resize up to 4px in horizontal or vertical direction. Crop starting at top left or bottom right.
-        # lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[1] + rng.randint(0, 4)),
-        #                       preserve_range=True, mode='constant')[:x.shape[0], :x.shape[1], :],
-        # lambda x: sktf.resize(x, (x.shape[0] + rng.randint(0, 4), x.shape[1] + rng.randint(0, 4)),
-        #                       preserve_range=True, mode='constant')[-x.shape[0]:, -x.shape[1]:, :],
-    ]
 
-    nb = rng.randint(nb_min, nb_max)
-    for _ in range(nb):
-        img = rng.choice(transforms)(img)
+def val_plot_predictions(json_path):
 
-    return img
+    return
