@@ -94,7 +94,7 @@ def get_train_val_idxs(hdf5_path, prop_trn=0.8, rng=None, nb_iter=1000):
         assert set(idxs_trn).intersection(idxs_val) == set([])
         dist_trn = np.sum(tags_binary[idxs_trn], axis=0) / len(idxs_trn)
         dist_val = np.sum(tags_binary[idxs_val], axis=0) / len(idxs_val)
-        if np.count_nonzero(dist_val) < dist_val.shape[0]:
+        if np.count_nonzero(dist_val) < dist_val.shape[0] or np.count_nonzero(dist_trn) < dist_trn.shape[0]:
             continue
         mae = np.mean(np.abs(dist_full - dist_trn)) + np.mean(np.abs(dist_full - dist_val))
         if mae < min_mae:
