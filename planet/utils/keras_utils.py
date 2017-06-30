@@ -108,7 +108,7 @@ class ValidationCB(Callback):
         '''
         1. Predictions on every image in the validation set.
         2. Evaluate the precision, recall, and F2 of each tag.
-        3. Store the metrics and predictions in a JSON file in the cpdir.
+        3. Store the metrics and predictions in a pickle file in the cpdir.
         '''
 
         # Make predictions and store all true and predicted tags. Round predictions.

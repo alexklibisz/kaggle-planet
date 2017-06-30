@@ -4,5 +4,4 @@ data/*
 **/__pycache__
 *.log
 !*/.keep
-!data/idxs_*.pkl
 notebooks/.ipynb_checkpoints

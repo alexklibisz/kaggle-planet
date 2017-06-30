@@ -13,16 +13,16 @@ from planet.utils.data_utils import bool_F2, tagstr_to_binary, binary_to_tagstr,
 
 def model_runner(model):
 
-    assert hasattr(model, 'create_net') and callable(model.create_net)
-    assert hasattr(model, 'predict') and callable(model.predict)
+    # assert hasattr(model, 'create_net') and callable(model.create_net)
+    # assert hasattr(model, 'predict') and callable(model.predict)
 
-    assert 'batch_size_trn' in model.config
-    assert 'batch_size_tst' in model.config
-    assert 'input_shape' in model.config
-    assert 'imgs_dir_trn' in model.config
-    assert 'imgs_csv_trn' in model.config
-    assert 'imgs_dir_tst' in model.config
-    assert 'imgs_csv_tst' in model.config
+    # assert 'batch_size_trn' in model.config
+    # assert 'batch_size_tst' in model.config
+    # assert 'input_shape' in model.config
+    # assert 'imgs_dir_trn' in model.config
+    # assert 'imgs_csv_trn' in model.config
+    # assert 'imgs_dir_tst' in model.config
+    # assert 'imgs_csv_tst' in model.config
 
     logging.basicConfig(level=logging.INFO)
     model_name = type(model).__name__
@@ -41,7 +41,7 @@ def model_runner(model):
     parser_train.set_defaults(which='optimize')
     parser_train.add_argument('-w', '--weights', help='network weights')
 
-    # Optimizing.
+    # Optimizing - NOT! - visualizing.
     parser_train = sub.add_parser('visualize', help='optimizing')
     parser_train.set_defaults(which='visualize')
     parser_train.add_argument('-w', '--weights', help='network weights')
@@ -55,12 +55,8 @@ def model_runner(model):
     args = vars(parser.parse_args())
     assert args['which'] in ['train', 'predict', 'optimize', 'visualize']
 
-    # Create network before loading weights or training.
-    model.create_net(args['weights'])
-    model.net.summary()
-
     if args['which'] == 'train':
-        model.train()
+        model.train(args['weights'])
 
     elif args['which'] == 'predict' and args['dataset'] == 'train':
         df = pd.read_csv(model.config['imgs_csv_trn'])

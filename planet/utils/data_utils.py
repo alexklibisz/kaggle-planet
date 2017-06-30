@@ -1,5 +1,8 @@
 from os import path, listdir
+from scipy.stats import entropy
 from sklearn.metrics import precision_score, recall_score, f1_score
+from tqdm import tqdm
+import h5py
 import tifffile as tif
 import numpy as np
 import pandas as pd
@@ -71,6 +74,35 @@ def correct_tags(tags):
     return tags
 
 
+def get_train_val_idxs(hdf5_path, prop_trn=0.8, rng=None, nb_iter=1000):
+    '''Picks the random training and validation indexes from the given array of tags
+    that minimizes the mean absolute error relative the full dataset.'''
+    if rng is None:
+        rng = np.random
+
+    f = h5py.File(hdf5_path, 'r')
+    tags_binary = f.get('tags')[...].astype(np.float32)
+    f.close()
+
+    dist_full = np.sum(tags_binary, axis=0) / len(tags_binary)
+    best, min_mae = None, 1e10
+    idxs = np.arange(tags_binary.shape[0])
+    splt = int(tags_binary.shape[0] * prop_trn)
+    for _ in range(nb_iter):
+        rng.shuffle(idxs)
+        idxs_trn, idxs_val = idxs[:splt], idxs[splt:]
+        assert set(idxs_trn).intersection(idxs_val) == set([])
+        dist_trn = np.sum(tags_binary[idxs_trn], axis=0) / len(idxs_trn)
+        dist_val = np.sum(tags_binary[idxs_val], axis=0) / len(idxs_val)
+        if np.count_nonzero(dist_val) < dist_val.shape[0]:
+            continue
+        mae = np.mean(np.abs(dist_full - dist_trn)) + np.mean(np.abs(dist_full - dist_val))
+        if mae < min_mae:
+            min_mae = mae
+            best = (idxs_trn, idxs_val)
+    return best
+
+
 def tagstr_to_binary(tagstr):
     tagset = set(tagstr.strip().split(' '))
     tags = np.zeros((len(TAGS)), dtype=np.int8)
@@ -88,29 +120,6 @@ def binary_to_tagstr(binary):
     return s.strip()
 
 
-def onehot_to_taglist(onehot):
-    taglist = []
-    for idx, tag in enumerate(TAGS):
-        if onehot[idx][1] == 1:
-            taglist.append(tag)
-    return taglist
-
-
-def onehot_precision(A, B):
-    return precision_score(A[:, 1], B[:, 1])
-
-
-def onehot_recall(A, B):
-    return recall_score(A[:, 1], B[:, 1])
-
-
-def onehot_F2(A, B):
-    beta = 2
-    p = onehot_precision(A, B)
-    r = onehot_recall(A, B)
-    return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
-
-
 def bool_F2(A, B):
     beta = 2
     p = precision_score(A, B)
@@ -118,11 +127,11 @@ def bool_F2(A, B):
     return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
 
 
-def val_plot_metrics(json_path):
+def val_plot_metrics(pickle_path):
 
     return
 
 
-def val_plot_predictions(json_path):
+def val_plot_predictions(pickle_path):
 
     return
