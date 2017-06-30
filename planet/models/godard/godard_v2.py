@@ -17,7 +17,7 @@ from keras.layers.advanced_activations import PReLU, ELU
 from math import ceil
 from os import path, mkdir, listdir, environ
 from PIL import Image
-from skimage.transform import resize
+from skimage.transform import resize, rotate
 from sklearn.model_selection import train_test_split
 from time import time
 import logging
@@ -37,7 +37,7 @@ from planet.utils.runtime import funcname
 
 class Godard(object):
 
-    def __init__(self, checkpoint_name='godard_softmax'):
+    def __init__(self, checkpoint_name='godard_v2_b'):
 
         self.config = {
             'output_shape': (17,),
@@ -54,7 +54,7 @@ class Godard(object):
             'imgs_csv_tst': 'data/sample_submission_v2.csv',
             'imgs_dir_tst': 'data/test-jpg',
             'img_ext': 'jpg',
-            'cache_imgs': True,
+            'cache_imgs': False,
 
             'trn_idxs_path': 'data/idxs_trn.pkl',
             'val_idxs_path': 'data/idxs_val.pkl'
@@ -73,56 +73,58 @@ class Godard(object):
     def create_net(self, weights_path=None):
 
         logger = logging.getLogger(funcname())
+        cki = 'he_normal'
+        dki = 'glorot_normal'
 
         inputs = Input(shape=self.config['input_shape'])
 
         # 2x Conv-batchnorm-prelu-dropout, maxpool
         def conv_block(nb_filters, prop_dropout, x):
-            ki = 'he_normal'
-            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
+            x = Conv2D(nb_filters, 3, padding='same', kernel_initializer=cki, name='conv_%d_0' % nb_filters)(x)
             x = BatchNormalization(momentum=0.5)(x)
             x = ELU()(x)
             x = Dropout(prop_dropout)(x)
-            x = Conv2D(nb_filters, (3, 3), padding='same', kernel_initializer=ki)(x)
+            x = Conv2D(nb_filters, 3, padding='same', kernel_initializer=cki)(x)
+            x = MaxPooling2D(pool_size=2)(x)
             x = BatchNormalization(momentum=0.5)(x)
             x = ELU()(x)
             x = Dropout(prop_dropout)(x)
-            return MaxPooling2D(pool_size=2)(x)
+            return x
 
         # Conv/pooling layers.
         x = conv_block(32, 0.1, inputs)
-        x = conv_block(64, 0.2, x)
-        x = conv_block(128, 0.3, x)
-        x = conv_block(256, 0.3, x)
-        x = conv_block(512, 0.3, x)
+        x = conv_block(64, 0.1, x)
+        x = conv_block(128, 0.2, x)
+        x = conv_block(256, 0.2, x)
+        x = conv_block(512, 0.2, x)
 
         # Shared fully-connected layers.
         # Dense-batchnorm-ELU-dropout
         x = Flatten()(x)
-        x = Dense(1024)(x)
+        x = Dense(1024, name='dense_shared_0', kernel_initializer=dki)(x)
         x = BatchNormalization(momentum=0.5)(x)
         x = ELU()(x)
-        x = Dropout(0.3)(x)
-        x = Dense(1024)(x)
+        x = Dropout(0.2)(x)
+        x = Dense(1024, name='dense_shared_1', kernel_initializer=dki)(x)
         x = BatchNormalization(momentum=0.5)(x)
         x = ELU()(x)
-        x = Dropout(0.3)(x)
+        x = Dropout(0.2)(x)
         shared = x
 
         # Single softmax classifier for the four cloud-cover tags.
         # Dense-batchnorm-ELU-dense-batchnorm-classification
-        x = Dense(256)(shared)
+        x = Dense(256, name='dense_clouds_0')(shared)
         x = BatchNormalization(momentum=0.5)(x)
         x = ELU()(x)
-        x = Dense(4)(x)
+        x = Dense(4, name='dense_clouds_1', kernel_initializer=dki)(x)
         x = BatchNormalization(momentum=0.5)(x)
         out_clds = Activation('softmax', name='out_clds')(x)
 
         # Single sigmoid classifier for remaining tags.
         # Dense-batchnorm-ELU-dense-batchnorm-classification
-        x = Dense(256)(shared)
+        x = Dense(256, name='dense_rest_0', kernel_initializer=dki)(shared)
         x = ELU()(x)
-        x = Dense(13)(x)
+        x = Dense(13, name='dense_rest_1', kernel_initializer=dki)(x)
         x = BatchNormalization(momentum=0.5)(x)
         out_rest = Activation('sigmoid', name='out_rest')(x)
 
@@ -149,12 +151,12 @@ class Godard(object):
         wneg = np.ones_like(pneg) * 0.5 / pneg
 
         def loss(yt, yp, wpos=K.variable(wpos), wneg=K.variable(wneg)):
-            # Log loss per tag per data point (b, c). Then compute and apply weight matrix.
+            '''Log loss per tag per data point (b, c). Then compute and apply weight matrix.'''
             loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))  # (b, c)
             wmat = (yt * wpos) + (K.abs(yt - 1) * wneg)     # (b,c)
             return K.mean(loss * wmat, axis=-1)             # (b,1)
 
-        self.net.compile(optimizer=Adam(0.002), metrics=[F2, prec, reca], loss=loss)
+        self.net.compile(optimizer=Adam(0.001), metrics=[F2, prec, reca, 'binary_crossentropy'], loss=loss)
         plot_model(self.net, to_file='%s/net.png' % self.cpdir)
 
         if weights_path is not None:
@@ -226,9 +228,9 @@ class Godard(object):
 
         aug_funcs = [
             lambda x: x,
-            lambda x: np.rot90(x, k=rng.randint(1, 4)),
             lambda x: np.flipud(x),
-            lambda x: np.fliplr(x)
+            lambda x: np.fliplr(x),
+            lambda x: rotate(x, rng.randint(0, 360), mode='reflect'),
         ]
 
         while True:

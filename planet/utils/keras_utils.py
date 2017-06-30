@@ -71,7 +71,7 @@ class ParamStatsCB(Callback):
             for li in self.trainable_lidxs:
                 w0 = self.lidx_wb_prev[li][0]
                 w1 = lidx_wb[li][0]
-                self.lidx_wstats[li].append((np.mean(w1), np.std(w1)))
+                self.lidx_wstats[li].append((np.mean(w1), np.var(w1)))
                 self.lidx_wratio[li].append(np.mean(np.abs(w1 - w0) / (np.abs(w1) + 1e-7)))
 
         self.lidx_wb_prev = lidx_wb
@@ -83,8 +83,8 @@ class ParamStatsCB(Callback):
         for li in self.trainable_lidxs:
             layer = self.model.layers[li]
             means = [m for m, s in self.lidx_wstats[li][-self.counter:]]
-            stdvs = [s for m, s in self.lidx_wstats[li][-self.counter:]]
-            print('%-30s wmean=%-8.3lf wstd=%-8.3lf' % (layer.name, np.mean(means), np.mean(stdvs)))
+            varcs = [s for m, s in self.lidx_wstats[li][-self.counter:]]
+            print('%-30s w mean=%-8.4lf w variance=%-8.4lf' % (layer.name, np.mean(means), np.mean(varcs)))
         self.counter = 0
         payload = {'lidx_wstats': self.lidx_wstats, 'lidx_wratio': self.lidx_wratio}
         with open('%s/param_stats.pkl' % self.cpdir, 'wb') as f:
