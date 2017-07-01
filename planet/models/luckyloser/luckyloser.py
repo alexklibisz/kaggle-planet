@@ -4,7 +4,7 @@ from keras.optimizers import Adam
 from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
 from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN
 from keras.layers.advanced_activations import PReLU, ELU
 from keras.losses import binary_crossentropy
 from pprint import pprint
@@ -12,7 +12,7 @@ from scipy.ndimage.interpolation import rotate
 from scipy.misc import imresize
 from time import sleep
 from tqdm import tqdm
-import gc
+import json
 import h5py
 import keras.backend as K
 import math
@@ -30,9 +30,10 @@ rng = np.random
 # Composable functions for structuring network.
 
 
-def _out_single_sigmoid(input):
+def _out_single_sigmoid(input, prop_dropout=None):
     '''Apply a 17x1 sigmoid activation with batch normalization to the input.'''
     x = BatchNormalization()(input)
+    x = Dropout(rng.uniform(0.05, 0.5) if prop_dropout is None else prop_dropout)(x)
     return Dense(17, activation='sigmoid')(x)
 
 
@@ -57,7 +58,7 @@ def _loss_bcr_wfn(yt, yp):
     return
 
 
-def _net_vgg(output=None, pretrained=False):
+def _net_vgg19(output=None, pretrained=False):
 
     from keras.applications.imagenet_utils import preprocess_input
     from keras.applications.vgg19 import VGG19
@@ -69,8 +70,24 @@ def _net_vgg(output=None, pretrained=False):
     return net, net.input_shape[1:], preprocess_input
 
 
-def _net_vgg_pretrained(output=None):
-    return _net_vgg(output, pretrained=True)
+def _net_vgg19_pretrained(output=None):
+    return _net_vgg19(output, pretrained=True)
+
+
+def _net_vgg16(output=None, pretrained=False):
+
+    from keras.applications.imagenet_utils import preprocess_input
+    from keras.applications.vgg16 import VGG16
+
+    vgg = VGG16(include_top=True, weights='imagenet' if pretrained else None)
+    out = output(vgg.get_layer('fc2').output)
+    net = Model(inputs=vgg.input, outputs=out)
+
+    return net, net.input_shape[1:], preprocess_input
+
+
+def _net_vgg16_pretrained(output=None):
+    return _net_vgg16(output, pretrained=True)
 
 
 def _net_godard(output=None):
@@ -92,17 +109,19 @@ class LuckyLoser(object):
             'preprocess_func': None,
 
             # Network setup.
-            'net_builder_func': _net_vgg_pretrained,
+            'net_builder_func': _net_vgg16_pretrained,
             'net_out_func': _out_single_sigmoid,
             'net_loss_func': _loss_bcr,
 
             # Training setup.
             'trn_epochs': 50,
-            'trn_augment_max_trn': 32,
+            'trn_augment_max_trn': 10,
             'trn_augment_max_val': 2,
             'trn_batch_size': 32,
             'trn_adam_params': {'lr': 0.002},
             'trn_prop_trn': 0.8,
+            'trn_prop_data': 1.,
+            'trn_early_stop': True,
 
             # Testing.
             'tst_batch_size': 1000
@@ -114,15 +133,17 @@ class LuckyLoser(object):
             os.mkdir(self.cfg['cpdir'])
         return self.cfg['cpdir']
 
-    def train(self, weights_path=None):
+    def train(self, weights_path=None, callbacks=[]):
 
         # Network setup.
         net, inshp, ppin = self.cfg['net_builder_func'](self.cfg['net_out_func'])
         self.cfg['input_shape'] = inshp
         self.cfg['preprocess_func'] = ppin
+        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'))
 
         # Data setup.
-        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], prop_trn=self.cfg['trn_prop_trn'])
+        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], prop_data=self.cfg['trn_prop_data'],
+                                                prop_trn=self.cfg['trn_prop_trn'])
         steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
         steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
         gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
@@ -132,8 +153,9 @@ class LuckyLoser(object):
                     metrics=[F2, prec, reca, 'accuracy'])
 
         net.summary()
+        if weights_path is not None:
+            net.load_weights(weights_path)
         pprint(self.cfg)
-        sleep(5)
 
         cb = [
             ValidationCB(self.cpdir, gen_val, self.cfg['trn_batch_size'], steps_val),
@@ -143,11 +165,18 @@ class LuckyLoser(object):
                             save_best_only=True, mode='max'),
             ReduceLROnPlateau(monitor='val_F2', factor=0.75, patience=10,
                               min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
-            EarlyStopping(monitor='val_F2', min_delta=0.01, patience=10, verbose=1, mode='max')
-        ]
+            EarlyStopping(monitor='F2', min_delta=0.001, patience=5, verbose=1, mode='max'),
+            TerminateOnNaN()
+        ] + callbacks
 
-        net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'],
-                          verbose=1, callbacks=cb)
+        if self.cfg['trn_early_stop']:
+            cb.append(EarlyStopping(monitor='val_F2', min_delta=0.001, patience=10, verbose=1, mode='max'))
+
+        train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'],
+                                  verbose=1, callbacks=cb)
+
+        # Return the training history.
+        return train.history
 
     def batch_gen(self, didxs, nb_steps, nb_augment_max, yield_didxs=False):
 
