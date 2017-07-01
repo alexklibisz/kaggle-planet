@@ -23,7 +23,7 @@ import pickle as pkl
 import sys
 sys.path.append('.')
 from planet.utils.data_utils import TAGS, IMG_MEAN_JPG_TRN, tagstr_to_binary, correct_tags, get_train_val_idxs
-from planet.utils.keras_utils import HistoryPlotCB, ValidationCB, prec, reca, F2
+from planet.utils.keras_utils import HistoryPlotCB, ValidationCB
 from planet.utils.runtime import funcname
 rng = np.random
 
@@ -37,12 +37,20 @@ def _out_single_sigmoid(input, prop_dropout=None):
     return Dense(17, activation='sigmoid')(x)
 
 
-def _out_multi_softmax():
-    return
+def _out_multi_softmax(input, prop_dropout=None):
+    '''17 individual softmax classifiers. Spliced to only include the positive activation.'''
+    x = BatchNormalization()(input)
+    _x = Dropout(rng.uniform(0.05, 0.5) if prop_dropout is None else prop_dropout)(x)
+    x = [Dense(2, activation='softmax')(_x) for _ in TAGS]
+    x = concatenate(x)
+    x = Reshape((len(TAGS), 2))(x)
+    return Lambda(lambda x: x[:, :, 1])(x)
 
 
 def _out_softmax_cover_sigmoid_rest():
     return
+
+outputs = [_out_single_sigmoid, _out_multi_softmax]
 
 
 def _loss_bcr(yt, yp):
@@ -56,6 +64,16 @@ def _loss_bcr_balanced(yt, yp):
 
 def _loss_bcr_wfn(yt, yp):
     return
+
+
+def _loss_mse(yt, yp):
+    return K.mean((yt - yp) ** 2, axis=-1)
+
+
+def _loss_mae(yt, yp):
+    return K.mean(K.abs(yt - yp), axis=-1)
+
+losses = [_loss_bcr, _loss_mse, _loss_mae]
 
 
 def _net_vgg19(output=None, pretrained=False):
@@ -93,6 +111,8 @@ def _net_vgg16_pretrained(output=None):
 def _net_godard(output=None):
     return
 
+nets = [_net_vgg19, _net_vgg19_pretrained, _net_vgg16, _net_vgg16_pretrained]
+
 
 class LuckyLoser(object):
 
@@ -112,6 +132,7 @@ class LuckyLoser(object):
             'net_builder_func': _net_vgg16_pretrained,
             'net_out_func': _out_single_sigmoid,
             'net_loss_func': _loss_bcr,
+            'net_threshold': 0.5,
 
             # Training setup.
             'trn_epochs': 50,
@@ -147,10 +168,34 @@ class LuckyLoser(object):
         steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
         steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
         gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
-        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
+        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'], yield_didxs=True)
+
+        def prec(yt, yp):
+            yp = K.cast(yp > self.cfg['net_threshold'], 'float')
+            tp = K.sum(yt * yp)
+            fp = K.sum(K.clip(yp - yt, 0, 1))
+            return tp / (tp + fp + K.epsilon())
+
+        def reca(yt, yp):
+            yp = K.cast(yp > self.cfg['net_threshold'], 'float')
+            tp = K.sum(yt * yp)
+            fn = K.sum(K.clip(yt - yp, 0, 1))
+            return tp / (tp + fn + K.epsilon())
+
+        def F2(yt, yp):
+            p = prec(yt, yp)
+            r = reca(yt, yp)
+            b = 2.0
+            return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
+
+        def acc(yt, yp):
+            fp = K.sum(K.clip(yp - yt, 0, 1))
+            fn = K.sum(K.clip(yt - yp, 0, 1))
+            sz = K.sum(K.ones_like(yt))
+            return (sz - (fp + fn)) / (sz + 1e-7)
 
         net.compile(optimizer=Adam(**self.cfg['trn_adam_params']), loss=self.cfg['net_loss_func'],
-                    metrics=[F2, prec, reca, 'accuracy'])
+                    metrics=[F2, prec, reca, acc])
 
         net.summary()
         if weights_path is not None:
@@ -158,19 +203,21 @@ class LuckyLoser(object):
         pprint(self.cfg)
 
         cb = [
-            ValidationCB(self.cpdir, gen_val, self.cfg['trn_batch_size'], steps_val),
+            EarlyStopping(monitor='F2', min_delta=0.01, patience=5, verbose=1, mode='max'),
+            ValidationCB(self.cpdir, gen_val, self.cfg['trn_batch_size'], steps_val,
+                         threshold=self.cfg['net_threshold']),
+            ReduceLROnPlateau(monitor='val_F2', factor=0.75, patience=10,
+                              min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
             HistoryPlotCB('%s/history.png' % self.cpdir),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
-            ReduceLROnPlateau(monitor='val_F2', factor=0.75, patience=10,
-                              min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
-            EarlyStopping(monitor='F2', min_delta=0.001, patience=5, verbose=1, mode='max'),
             TerminateOnNaN()
+
         ] + callbacks
 
         if self.cfg['trn_early_stop']:
-            cb.append(EarlyStopping(monitor='val_F2', min_delta=0.001, patience=10, verbose=1, mode='max'))
+            cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=10, verbose=1, mode='max'))
 
         train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'],
                                   verbose=1, callbacks=cb)

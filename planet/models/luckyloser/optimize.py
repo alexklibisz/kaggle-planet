@@ -8,7 +8,7 @@ import os
 
 import sys
 sys.path.append('.')
-from planet.models.luckyloser.luckyloser import LuckyLoser, _out_single_sigmoid, _loss_bcr, _net_vgg16, _net_vgg16_pretrained, _net_vgg19, _net_vgg19_pretrained
+from planet.models.luckyloser.luckyloser import LuckyLoser, outputs, losses, nets
 
 
 def serialize_config(config):
@@ -32,29 +32,31 @@ class TimeoutCB(Callback):
 
 def powerball(CUDA_VISIBLE_DEVICES='0', nb_max_hours=4., trn_prop_data=0.1):
 
-    ID = int(time()) + os.getpid()
+    seed = int(time()) + os.getpid()
+    np.random.seed(seed)
     rng = np.random
-    rng.seed(ID)
 
     model = LuckyLoser()
-    model.cfg['cpdir'] = 'checkpoints/luckyloser_rs_%d' % ID
+    model.cfg['seed'] = seed
+    model.cfg['cpdir'] = 'checkpoints/luckyloser_rs_%d' % seed
 
     # JPG or TIFF. TODO: TIFFs
     model.cfg['hdf5_path_trn'] = rng.choice(['data/train-jpg.hdf5'])
     model.cfg['hdf5_path_tst'] = model.cfg['hdf5_path_trn'].replace('train', 'test')
 
     # Input shape.
-    hw = rng.randint(64, 256)
-    model.cfg['input_shape'] = (hw, hw, 3 if 'jpg' in model.cfg['hdf5_path_trn'] else 4)
+    _ = rng.randint(64, 256)
+    model.cfg['input_shape'] = (_, _, 3 if 'jpg' in model.cfg['hdf5_path_trn'] else 4)
 
     # Network setup.
-    model.cfg['net_builder_func'] = rng.choice([_net_vgg16, _net_vgg16_pretrained, _net_vgg19, _net_vgg19_pretrained])
-    model.cfg['net_out_func'] = rng.choice([_out_single_sigmoid])
-    model.cfg['net_loss_func'] = rng.choice([_loss_bcr])
+    model.cfg['net_builder_func'] = rng.choice(nets)
+    model.cfg['net_out_func'] = rng.choice(outputs)
+    model.cfg['net_loss_func'] = rng.choice(losses)
+    model.cfg['net_threshold'] = rng.choice(np.arange(0.2, 0.5, 0.01))
 
     # Training setup.
     model.cfg['trn_augment_max_trn'] = rng.randint(0, 20)
-    model.cfg['trn_batch_size'] = rng.choice(np.arange(10, 100, 2))
+    model.cfg['trn_batch_size'] = rng.choice(np.arange(8, 64, 8))
     model.cfg['trn_adam_params'] = {'lr': 10**rng.uniform(-4, -2)}
     model.cfg['trn_prop_trn'] = rng.uniform(0.7, 0.8)
     model.cfg['trn_epochs'] = 1000
@@ -68,7 +70,7 @@ def powerball(CUDA_VISIBLE_DEVICES='0', nb_max_hours=4., trn_prop_data=0.1):
 
     # Rename directory with maximum val_F2 divided by number of epochs.
     nb_epochs = len(history['loss'])
-    cpdir = model.cfg['cpdir'].replace(str(ID), '%.3lf_%.4lf_%d' % (
+    cpdir = model.cfg['cpdir'].replace(str(seed), '%.3lf_%.4lf_%d' % (
         model.cfg['trn_prop_data'], np.max(history['val_F2']), nb_epochs))
     os.rename(model.cfg['cpdir'], cpdir)
 
@@ -77,8 +79,10 @@ def powerball(CUDA_VISIBLE_DEVICES='0', nb_max_hours=4., trn_prop_data=0.1):
     with open('%s/report.json' % cpdir, 'w') as fp:
         json.dump(payload, fp, indent=4)
 
+    print('Complete - saved results to %s' % cpdir)
+
 if __name__ == "__main__":
 
     assert 'CUDA_VISIBLE_DEVICES' in os.environ
     assert len(os.environ['CUDA_VISIBLE_DEVICES'].split(',')) == 1
-    powerball(os.environ['CUDA_VISIBLE_DEVICES'], nb_max_hours=4.)
+    powerball(os.environ['CUDA_VISIBLE_DEVICES'], nb_max_hours=2.)
