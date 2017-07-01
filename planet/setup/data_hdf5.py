@@ -12,7 +12,7 @@ sys.path.append('.')
 from planet.utils.data_utils import TAGS, tagstr_to_binary
 
 
-def hdf5_jpgs(dir_jpg, path_csv, path_hdf5, tags=True):
+def hdf5_jpgs(dir_jpg, path_csv, path_hdf5):
     '''Make hdf5 file with 'images/[index]' datasets for each image and a single 'tags' dataset
     containing the array of binary tag arrays.'''
     df = pd.read_csv(path_csv)
@@ -25,14 +25,13 @@ def hdf5_jpgs(dir_jpg, path_csv, path_hdf5, tags=True):
         ds[...] = np.asarray(jpg)
         assert np.all(ds[...] == jpg)
 
-    if tags:
-        tags = np.zeros((df.shape[0], len(TAGS)), dtype=np.int8)
-        for i, row in tqdm(df.iterrows()):
-            tagstr = row['tags']
-            tags[i] = tagstr_to_binary(tagstr)
+    tags = np.zeros((df.shape[0], len(TAGS)), dtype=np.int8)
+    for i, row in tqdm(df.iterrows()):
+        tagstr = row['tags']
+        tags[i] = tagstr_to_binary(tagstr)
 
-        ds = f.create_dataset('tags', tags.shape, dtype='int8')
-        ds[...] = tags
+    ds = f.create_dataset('tags', tags.shape, dtype='int8')
+    ds[...] = tags
 
     f.close()
 
@@ -43,5 +42,5 @@ def hdf5_jpgs(dir_jpg, path_csv, path_hdf5, tags=True):
         img = f.get(dsnames[i])[...]
 
 
-hdf5_jpgs('data/train-jpg', 'data/train_v2.csv', 'data/train-jpg.hdf5', True)
-# hdf5_jpgs('data/test-jpg', 'data/sample_submission_v2.csv', 'data/test-jpg.hdf5', False)
+hdf5_jpgs('data/train-jpg', 'data/train_v2.csv', 'data/train-jpg.hdf5')
+hdf5_jpgs('data/test-jpg', 'data/sample_submission_v2.csv', 'data/test-jpg.hdf5')

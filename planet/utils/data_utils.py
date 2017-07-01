@@ -74,26 +74,27 @@ def correct_tags(tags):
     return tags
 
 
-def get_train_val_idxs(hdf5_path, prop_trn=0.8, rng=None, nb_iter=1000):
+def get_train_val_idxs(hdf5_path, prop_data=1.0, prop_trn=0.8, rng=None, nb_iter=800):
     '''Picks the random training and validation indexes from the given array of tags
     that minimizes the mean absolute error relative the full dataset.'''
     if rng is None:
         rng = np.random
 
     f = h5py.File(hdf5_path, 'r')
-    tags_binary = f.get('tags')[...].astype(np.float32)
+    tags = f.get('tags')[...].astype(np.float32)
     f.close()
 
-    dist_full = np.sum(tags_binary, axis=0) / len(tags_binary)
+    dist_full = np.sum(tags, axis=0) / len(tags)
     best, min_mae = None, 1e10
-    idxs = np.arange(tags_binary.shape[0])
-    splt = int(tags_binary.shape[0] * prop_trn)
+    idxs = np.arange(tags.shape[0])
+    nbtrn = int(tags.shape[0] * prop_data * prop_trn)
+    nbval = int(tags.shape[0] * prop_data * (1 - prop_trn))
     for _ in range(nb_iter):
         rng.shuffle(idxs)
-        idxs_trn, idxs_val = idxs[:splt], idxs[splt:]
+        idxs_trn, idxs_val = idxs[:nbtrn], idxs[-nbval:]
         assert set(idxs_trn).intersection(idxs_val) == set([])
-        dist_trn = np.sum(tags_binary[idxs_trn], axis=0) / len(idxs_trn)
-        dist_val = np.sum(tags_binary[idxs_val], axis=0) / len(idxs_val)
+        dist_trn = np.sum(tags[idxs_trn], axis=0) / len(idxs_trn)
+        dist_val = np.sum(tags[idxs_val], axis=0) / len(idxs_val)
         if np.count_nonzero(dist_val) < dist_val.shape[0] or np.count_nonzero(dist_trn) < dist_trn.shape[0]:
             continue
         mae = np.mean(np.abs(dist_full - dist_trn)) + np.mean(np.abs(dist_full - dist_val))
