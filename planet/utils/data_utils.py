@@ -6,6 +6,7 @@ import h5py
 import tifffile as tif
 import numpy as np
 import pandas as pd
+import pickle as pkl
 import skimage.transform as sktf
 
 
@@ -129,10 +130,130 @@ def bool_F2(A, B):
 
 
 def val_plot_metrics(pickle_path):
+    import matplotlib.pyplot as plt
+
+    data = pkl.load(open(pickle_path, "rb") )
+
+    # Plot each tag's F2, precision, and recall over time
+
+    mymin = 1
+    tags = sorted(data['tag_metrics'])
+    for tag in tags:
+        for metric in data['tag_metrics'][tag]:
+            _ = min(data['tag_metrics'][tag][metric])
+            if _ < mymin:
+                mymin = _
+
+    for tag in tags:
+        print(tag)
+        plt.figure(figsize=(15, 8))
+        for metric in data['tag_metrics'][tag]:
+            plt.plot(data['tag_metrics'][tag][metric])
+            _ = min(data['tag_metrics'][tag][metric])
+            if _ < mymin:
+                mymin = _
+        plt.legend([metric for metric in data['tag_metrics'][tag]], loc='lower right')
+        plt.title(tag)
+        plt.ylim([mymin,1])
+        
+        plt.show()
 
     return
 
 
 def val_plot_predictions(pickle_path):
 
+    import matplotlib.pyplot as plt
+    darkgreen = '#196419'
+    barwidth = 0.45
+
+    data = pkl.load(open(pickle_path, "rb") )
+
+    yp = np.asarray(data['yp'])
+    yt = np.asarray(data['yt'])
+
+    # Sum up for each row, so that we have fn and fp for each tag
+    fn = np.sum(np.clip(yt - yp, 0, 1), axis=0)
+    fp = np.sum(np.clip(yp - yt, 0, 1), axis=0)
+
+    xvals = np.arange(yp.shape[1])
+
+    plt.figure(figsize=(15, 8))
+    plt.bar(xvals, fp, label="False Positives", color=darkgreen)
+    plt.xticks(xvals, TAGS_short)
+    plt.title("False Positives")
+    plt.ylabel("Count")
+    plt.show()
+
+    plt.figure(figsize=(15, 8))
+    plt.bar(xvals, fn, label="False Negatives", color='black')
+    plt.xticks(xvals, TAGS_short)
+    plt.title("False Negatives")
+    plt.ylabel("Count")
+    plt.show()
+
+
+    plt.figure(figsize=(15, 8))
+    plt.bar(xvals-barwidth/2, fp, barwidth, label="False Positives", color=darkgreen)
+    plt.bar(xvals+barwidth/2, fn, barwidth, label="False Negatives", color='black')
+    plt.xticks(xvals, TAGS_short)
+    plt.title("False Positives Compared To False Negatives")
+    plt.legend()
+    plt.ylabel("Count")
+    plt.show()
+
+    plt.figure(figsize=(15, 8))
+    plt.bar(xvals, fp+fn, color=(0.6, 0.1, 0.1))
+    plt.xticks(xvals, TAGS_short)
+    plt.title("Total Incorrect")
+    plt.legend()
+    plt.ylabel("Count")
+    plt.show()
+
+    numCorrect = np.sum(np.equal(yt, yp), axis=1)
+
+    print("I'm sorry if the x-axis labels are all shifted messed. I'll try to fix that eventually")
+
+    plt.figure(figsize=(15, 8))
+    plt.hist(len(TAGS) - numCorrect, len(TAGS), rwidth=0.9, log=True)
+    plt.title("Number of Incorrect Labels Histogram (Log Scale)")
+    plt.xticks(list(range(len(TAGS))))
+    plt.ylabel("Count")
+    plt.xlabel("Number of Incorrect Labels")
+
+    plt.figure(figsize=(15, 8))
+    plt.hist(len(TAGS) - numCorrect, len(TAGS), rwidth=0.9)
+    plt.title("Number of Incorrect Labels Histogram (Linear Scale)")
+    plt.xticks(list(range(len(TAGS))))
+    plt.ylabel("Count")
+    plt.xlabel("Number of Incorrect Labels")
+
+    k = 10
+    if k > len(numCorrect)-1:
+        k = len(numCorrect)-1
+
+    fig, axes = plt.subplots(k, figsize=(15, 8*k))
+    xvals = np.arange(yp.shape[1])
+
+    # Get and sort the k lowest indices
+    kSmallest = np.argpartition(numCorrect, k)[:k]
+    kSmallest = sorted(kSmallest, key=lambda i1: numCorrect[i1])
+
+    colors = [0] *len(TAGS)
+    for idx, ax in zip(kSmallest, fig.axes):
+        points = yp[idx] - yt[idx]
+        for i in range(len(points)):
+            if yp[idx][i] > yt[idx][i]:
+                colors[i] = '#196419'
+            elif yp[idx][i] < yt[idx][i]:
+                colors[i] = 'black'
+            else:
+                colors[i] = 'b'
+
+        ax.scatter(xvals, points, marker='x', c=colors)
+        ax.set_xticks(xvals)
+        ax.set_yticks([-1, 0, 1])
+        ax.set_yticklabels(["false negative", "correct", "false positive"])
+        ax.set_xticklabels(TAGS_short)
+    plt.show()
     return
