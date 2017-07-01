@@ -68,7 +68,8 @@ def powerball(CUDA_VISIBLE_DEVICES='0', nb_max_hours=4., trn_prop_data=0.1):
 
     # Rename directory with maximum val_F2 divided by number of epochs.
     nb_epochs = len(history['loss'])
-    cpdir = model.cfg['cpdir'].replace(str(ID), '%.4lf_%d' % (np.max(history['val_F2']), nb_epochs))
+    cpdir = model.cfg['cpdir'].replace(str(ID), '%.3lf_%.4lf_%d' % (
+        model.cfg['trn_prop_data'], np.max(history['val_F2']), nb_epochs))
     os.rename(model.cfg['cpdir'], cpdir)
 
     # Save config to disk.
