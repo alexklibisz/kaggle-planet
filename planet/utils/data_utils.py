@@ -74,7 +74,7 @@ def correct_tags(tags):
     return tags
 
 
-def get_train_val_idxs(hdf5_path, prop_data=1.0, prop_trn=0.8, rng=None, nb_iter=800):
+def get_train_val_idxs(hdf5_path, prop_data=1.0, prop_trn=0.8, rng=None, nb_iter=2000):
     '''Picks the random training and validation indexes from the given array of tags
     that minimizes the mean absolute error relative the full dataset.'''
     if rng is None:

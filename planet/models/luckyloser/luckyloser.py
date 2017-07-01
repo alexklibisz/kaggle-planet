@@ -200,7 +200,7 @@ class LuckyLoser(object):
 
                 ib = np.zeros(ib_shape, dtype=np.uint8)
                 tb = np.zeros(tb_shape, dtype=np.uint8)
-                db = np.zeros(tb_shape, dtype=np.int16)
+                db = np.zeros((self.cfg['trn_batch_size'],), dtype=np.uint16)
 
                 for bidx in range(self.cfg['trn_batch_size']):
                     db[bidx] = next(didxs_cycle)
@@ -217,7 +217,7 @@ class LuckyLoser(object):
                     # fig.axes[1].imshow(ib[bidx])
                     # plt.show()
                 if yield_didxs:
-                    yield self.cfg['preprocess_func'](ib * 1.), tb, db 
+                    yield self.cfg['preprocess_func'](ib * 1.), tb, db
                 else:
                     yield self.cfg['preprocess_func'](ib * 1.), tb
 
