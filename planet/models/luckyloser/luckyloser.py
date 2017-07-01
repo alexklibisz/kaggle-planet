@@ -30,10 +30,10 @@ rng = np.random
 # Composable functions for structuring network.
 
 
-def _out_single_sigmoid(input):
+def _out_single_sigmoid(input, prop_dropout=None):
     '''Apply a 17x1 sigmoid activation with batch normalization to the input.'''
     x = BatchNormalization()(input)
-    x = Dropout(0.2)(x)
+    x = Dropout(rng.uniform(0.05, 0.5) if prop_dropout is None else prop_dropout)(x)
     return Dense(17, activation='sigmoid')(x)
 
 
