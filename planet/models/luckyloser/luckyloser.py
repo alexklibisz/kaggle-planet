@@ -149,7 +149,7 @@ class LuckyLoser(object):
         net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'],
                           verbose=1, callbacks=cb)
 
-    def batch_gen(self, didxs, nb_steps, nb_augment_max):
+    def batch_gen(self, didxs, nb_steps, nb_augment_max, yield_didxs=False):
 
         data = h5py.File(self.cfg['hdf5_path_trn'], 'r')
         imgs = data.get('images')
@@ -171,12 +171,13 @@ class LuckyLoser(object):
 
                 ib = np.zeros(ib_shape, dtype=np.uint8)
                 tb = np.zeros(tb_shape, dtype=np.uint8)
+                db = np.zeros(tb_shape, dtype=np.int16)
 
                 for bidx in range(self.cfg['trn_batch_size']):
-                    didx = next(didxs_cycle)
-                    img = imgs.get(str(didx))[...]
+                    db[bidx] = next(didxs_cycle)
+                    img = imgs.get(str(db[bidx]))[...]
                     ib[bidx] = imresize(img, self.cfg['input_shape'])
-                    tb[bidx] = tags[didx]
+                    tb[bidx] = tags[db[bidx]]
                     for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max)):
                         ib[bidx] = aug(ib[bidx])
 
@@ -186,8 +187,10 @@ class LuckyLoser(object):
                     # fig.axes[0].imshow(imgs.get(str(didx))[...])
                     # fig.axes[1].imshow(ib[bidx])
                     # plt.show()
-
-                yield self.cfg['preprocess_func'](ib * 1.), tb
+                if yield_didxs:
+                    yield self.cfg['preprocess_func'](ib * 1.), tb, db 
+                else:
+                    yield self.cfg['preprocess_func'](ib * 1.), tb
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
