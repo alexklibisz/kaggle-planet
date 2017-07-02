@@ -7,6 +7,7 @@ from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
 from keras.layers.advanced_activations import PReLU, ELU
 from keras.losses import binary_crossentropy
+from keras.regularizers import l2
 from pprint import pprint
 from scipy.ndimage.interpolation import rotate
 from scipy.misc import imresize
@@ -124,21 +125,23 @@ def _net_godard(output_func=None, input_shape=None):
 
     from planet.utils.data_utils import IMG_MEAN_JPG_TRN
 
-    def mean_subtract_batch(x):
+    def mean_subtract_imgs(x):
         for c in range(x.shape[-1]):
             x[:, :, :, c] -= IMG_MEAN_JPG_TRN[c]
         d = 255. if x.shape[-1] == 3 else 65535
         return x / d
 
-    ki = 'he_uniform'
+    def tags(x):
+        return x
+
     input = Input(shape=input_shape if input_shape is not None else (64, 64, 3), name='00.input')
     x = BatchNormalization(momentum=0.1, input_shape=input_shape, name='01.Bnrm')(input)
 
     def conv_block(x, f, n):
-        x = Conv2D(f, 3, padding='same', kernel_initializer=ki, name='%02d.0.Conv2D%d' % (n, f))(x)
+        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%02d.0.Conv2D%d' % (n, f))(x)
         x = BatchNormalization(momentum=0.1, name='%02d.1.Bnrm' % n)(x)
         x = Activation('relu', name='%02d.2.ReLU' % n)(x)
-        x = Conv2D(f, 3, padding='same', kernel_initializer=ki, name='%02d.3.Conv2D%d' % (n, f))(x)
+        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%02d.3.Conv2D%d' % (n, f))(x)
         x = BatchNormalization(momentum=0.1, name='%02d.4.Bnrm' % n)(x)
         x = Activation('relu', name='%02d.5.ReLU' % n)(x)
         x = MaxPooling2D(pool_size=2, name='%02d.6.MaxPool' % n)(x)
@@ -151,15 +154,18 @@ def _net_godard(output_func=None, input_shape=None):
     x = conv_block(x, 256, 5)
 
     x = Flatten(name='06.Flat')(x)
-    x = Dense(512, name='07.Dens512', kernel_initializer=ki)(x)
-    x = Activation('relu', name='08.ReLU')(x)
+    x = Dense(512, name='07.Dens512', kernel_initializer='he_uniform')(x)
     x = BatchNormalization(momentum=0.1, name='09.Bnrm')(x)
+    x = Activation('relu', name='08.ReLU')(x)
     x = Dropout(0.0, name='10.Drop')(x)
-    x = Dense(len(TAGS), name='11.Dens17', kernel_initializer=ki)(x)
-    x = BatchNormalization(momentum=0.1, name='12.Bnrm')(x)
-    x = Activation('sigmoid', name='13.Sigm')(x)
+    x = Dense(len(TAGS), name='11.Dens17', kernel_initializer='glorot_uniform')(x)
+    x = BatchNormalization(beta_regularizer=l2(0.1), momentum=0.1, name='12.Bnrm')(x)
 
-    return Model(inputs=input, outputs=x), input_shape, mean_subtract_batch
+    # Regular or thresholded sigmoid. In both cases, the gradient is very close to zero.
+    x = Activation('sigmoid', name='13.Sigm')(x)
+    # x = ThresholdedSigmoid(lower=0.2, upper=0.8, name='13.Sigm')(x)
+
+    return Model(inputs=input, outputs=x), input_shape, mean_subtract_imgs, tags
 
 
 nets = [_net_godard]
@@ -177,7 +183,8 @@ class LuckyLoser(object):
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
             'input_shape': (64, 64, 3),
-            'preprocess_func': None,
+            'preprocess_imgs_func': None,
+            'preprocess_tags_func': None,
 
             # Network setup.
             'net_builder_func': _net_godard,
@@ -208,9 +215,10 @@ class LuckyLoser(object):
     def train(self, weights_path=None, callbacks=[]):
 
         # Network setup.
-        net, inshp, ppin = self.cfg['net_builder_func'](self.cfg['net_out_func'], self.cfg['input_shape'])
+        net, inshp, ppimgs, pptags = self.cfg['net_builder_func'](self.cfg['net_out_func'], self.cfg['input_shape'])
         self.cfg['input_shape'] = inshp
-        self.cfg['preprocess_func'] = ppin
+        self.cfg['preprocess_imgs_func'] = ppimgs
+        self.cfg['preprocess_tags_func'] = pptags
         json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
         json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
 
@@ -300,7 +308,7 @@ class LuckyLoser(object):
             for _ in range(nb_steps):
 
                 ib = np.zeros(ib_shape, dtype=np.float16)
-                tb = np.zeros(tb_shape, dtype=np.uint8)
+                tb = np.zeros(tb_shape, dtype=np.int16)
                 db = np.zeros((self.cfg['trn_batch_size'],), dtype=np.uint16)
 
                 for bidx in range(self.cfg['trn_batch_size']):
@@ -317,10 +325,7 @@ class LuckyLoser(object):
                     # fig.axes[0].imshow(imgs.get(str(didx))[...])
                     # fig.axes[1].imshow(ib[bidx])
                     # plt.show()
-                if yield_didxs:
-                    yield self.cfg['preprocess_func'](ib * 1.), tb, db
-                else:
-                    yield self.cfg['preprocess_func'](ib * 1.), tb
+                yield self.cfg['preprocess_imgs_func'](ib), self.cfg['preprocess_tags_func'](tb)
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
