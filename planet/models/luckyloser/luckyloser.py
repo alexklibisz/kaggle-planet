@@ -4,13 +4,13 @@ from keras.optimizers import Adam
 from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
 from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
 from keras.layers.advanced_activations import PReLU, ELU
 from keras.losses import binary_crossentropy
 from pprint import pprint
 from scipy.ndimage.interpolation import rotate
 from scipy.misc import imresize
-from time import sleep
+from time import sleep, time
 from tqdm import tqdm
 import json
 import h5py
@@ -22,12 +22,24 @@ import pickle as pkl
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import TAGS, IMG_MEAN_JPG_TRN, tagstr_to_binary, correct_tags, get_train_val_idxs
-from planet.utils.keras_utils import HistoryPlotCB, ValidationCB
+from planet.utils.data_utils import TAGS, tagstr_to_binary, correct_tags, get_train_val_idxs
+from planet.utils.keras_utils import HistoryPlotCB, ValidationCB, ThresholdedSigmoid, TensorBoardWrapper
 from planet.utils.runtime import funcname
 rng = np.random
 
 # Composable functions for structuring network.
+
+
+def serialize_config(config):
+    _config = {}
+    for k, v in config.items():
+        if callable(v):
+            _config[k] = v.__name__
+        elif type(v) == np.int64:
+            _config[k] = float(v)
+        else:
+            _config[k] = v
+    return _config
 
 
 def _out_single_sigmoid(input, prop_dropout=None):
@@ -73,7 +85,7 @@ def _loss_mse(yt, yp):
 def _loss_mae(yt, yp):
     return K.mean(K.abs(yt - yp), axis=-1)
 
-losses = [_loss_bcr, _loss_mse, _loss_mae]
+losses = [_loss_bcr, _loss_mse]
 
 
 def _net_vgg19(output=None, pretrained=False):
@@ -108,10 +120,49 @@ def _net_vgg16_pretrained(output=None):
     return _net_vgg16(output, pretrained=True)
 
 
-def _net_godard(output=None):
-    return
+def _net_godard(output_func=None, input_shape=None):
 
-nets = [_net_vgg19, _net_vgg19_pretrained, _net_vgg16, _net_vgg16_pretrained]
+    from planet.utils.data_utils import IMG_MEAN_JPG_TRN
+
+    def mean_subtract_batch(x):
+        for c in range(x.shape[-1]):
+            x[:, :, :, c] -= IMG_MEAN_JPG_TRN[c]
+        d = 255. if x.shape[-1] == 3 else 65535
+        return x / d
+
+    ki = 'he_uniform'
+    input = Input(shape=input_shape if input_shape is not None else (64, 64, 3), name='00.input')
+    x = BatchNormalization(momentum=0.1, input_shape=input_shape, name='01.Bnrm')(input)
+
+    def conv_block(x, f, n):
+        x = Conv2D(f, 3, padding='same', kernel_initializer=ki, name='%02d.0.Conv2D%d' % (n, f))(x)
+        x = BatchNormalization(momentum=0.1, name='%02d.1.Bnrm' % n)(x)
+        x = Activation('relu', name='%02d.2.ReLU' % n)(x)
+        x = Conv2D(f, 3, padding='same', kernel_initializer=ki, name='%02d.3.Conv2D%d' % (n, f))(x)
+        x = BatchNormalization(momentum=0.1, name='%02d.4.Bnrm' % n)(x)
+        x = Activation('relu', name='%02d.5.ReLU' % n)(x)
+        x = MaxPooling2D(pool_size=2, name='%02d.6.MaxPool' % n)(x)
+        x = Dropout(0.0, name='%02d.7.MaxPool' % n)(x)
+        return x
+
+    x = conv_block(x, 32, 2)
+    x = conv_block(x, 64, 3)
+    x = conv_block(x, 128, 4)
+    x = conv_block(x, 256, 5)
+
+    x = Flatten(name='06.Flat')(x)
+    x = Dense(512, name='07.Dens512', kernel_initializer=ki)(x)
+    x = Activation('relu', name='08.ReLU')(x)
+    x = BatchNormalization(momentum=0.1, name='09.Bnrm')(x)
+    x = Dropout(0.0, name='10.Drop')(x)
+    x = Dense(len(TAGS), name='11.Dens17', kernel_initializer=ki)(x)
+    x = BatchNormalization(momentum=0.1, name='12.Bnrm')(x)
+    x = Activation('sigmoid', name='13.Sigm')(x)
+
+    return Model(inputs=input, outputs=x), input_shape, mean_subtract_batch
+
+
+nets = [_net_godard]
 
 
 class LuckyLoser(object):
@@ -122,27 +173,27 @@ class LuckyLoser(object):
         self.cfg = {
 
             # Data setup.
-            'cpdir': 'checkpoints/luckyloser',
+            'cpdir': 'checkpoints/luckyloser_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
-            'input_shape': (150, 150, 3),
+            'input_shape': (64, 64, 3),
             'preprocess_func': None,
 
             # Network setup.
-            'net_builder_func': _net_vgg16_pretrained,
+            'net_builder_func': _net_godard,
             'net_out_func': _out_single_sigmoid,
             'net_loss_func': _loss_bcr,
             'net_threshold': 0.5,
 
             # Training setup.
-            'trn_epochs': 50,
-            'trn_augment_max_trn': 10,
-            'trn_augment_max_val': 2,
-            'trn_batch_size': 32,
-            'trn_adam_params': {'lr': 0.002},
+            'trn_epochs': 100,
+            'trn_augment_max_trn': 2,
+            'trn_augment_max_val': 1,
+            'trn_batch_size': 40,
+            'trn_adam_params': {'lr': 0.001},
             'trn_prop_trn': 0.8,
-            'trn_prop_data': 1.,
-            'trn_early_stop': True,
+            'trn_prop_data': 0.5,
+            'trn_monitor_val': False,
 
             # Testing.
             'tst_batch_size': 1000
@@ -157,10 +208,11 @@ class LuckyLoser(object):
     def train(self, weights_path=None, callbacks=[]):
 
         # Network setup.
-        net, inshp, ppin = self.cfg['net_builder_func'](self.cfg['net_out_func'])
+        net, inshp, ppin = self.cfg['net_builder_func'](self.cfg['net_out_func'], self.cfg['input_shape'])
         self.cfg['input_shape'] = inshp
         self.cfg['preprocess_func'] = ppin
-        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'))
+        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
+        json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
 
         # Data setup.
         idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], prop_data=self.cfg['trn_prop_data'],
@@ -168,7 +220,7 @@ class LuckyLoser(object):
         steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
         steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
         gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
-        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'], yield_didxs=True)
+        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
 
         def prec(yt, yp):
             yp = K.cast(yp > self.cfg['net_threshold'], 'float')
@@ -201,14 +253,15 @@ class LuckyLoser(object):
         if weights_path is not None:
             net.load_weights(weights_path)
         pprint(self.cfg)
+        sleep(5)
 
         cb = [
+            # ValidationCB(self.cpdir, gen_val, self.cfg['trn_batch_size'], steps_val,
+            #              threshold=self.cfg['net_threshold']),
+            # HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=5, verbose=1, mode='max'),
-            ValidationCB(self.cpdir, gen_val, self.cfg['trn_batch_size'], steps_val,
-                         threshold=self.cfg['net_threshold']),
-            ReduceLROnPlateau(monitor='val_F2', factor=0.75, patience=10,
-                              min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'),
-            HistoryPlotCB('%s/history.png' % self.cpdir),
+            TensorBoardWrapper(gen_val, nb_steps=5, log_dir=self.cfg['cpdir'], histogram_freq=1,
+                               batch_size=self.cfg['trn_batch_size'], write_graph=False, write_grads=True),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
@@ -216,13 +269,14 @@ class LuckyLoser(object):
 
         ] + callbacks
 
-        if self.cfg['trn_early_stop']:
+        if self.cfg['trn_monitor_val']:
+            cb.append(ReduceLROnPlateau(monitor='val_F2', factor=0.75, patience=10,
+                                        min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'))
             cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=10, verbose=1, mode='max'))
 
         train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'],
-                                  verbose=1, callbacks=cb)
+                                  verbose=1, callbacks=cb, validation_data=gen_val, validation_steps=steps_val)
 
-        # Return the training history.
         return train.history
 
     def batch_gen(self, didxs, nb_steps, nb_augment_max, yield_didxs=False):
@@ -245,7 +299,7 @@ class LuckyLoser(object):
 
             for _ in range(nb_steps):
 
-                ib = np.zeros(ib_shape, dtype=np.uint8)
+                ib = np.zeros(ib_shape, dtype=np.float16)
                 tb = np.zeros(tb_shape, dtype=np.uint8)
                 db = np.zeros((self.cfg['trn_batch_size'],), dtype=np.uint16)
 

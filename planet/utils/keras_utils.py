@@ -1,4 +1,5 @@
-from keras.callbacks import Callback
+from keras.callbacks import Callback, TensorBoard
+from keras.engine import Layer
 from math import ceil
 from shutil import copyfile
 from sklearn.metrics import fbeta_score, precision_score, recall_score
@@ -11,6 +12,23 @@ import os
 import pickle as pkl
 
 from planet.utils.data_utils import TAGS
+
+
+class ThresholdedSigmoid(Layer):
+
+    def __init__(self, lower=0.2, upper=0.8, **kwargs):
+        super(ThresholdedSigmoid, self).__init__(**kwargs)
+        self.supports_masking = True
+        self.lower = K.cast_to_floatx(lower)
+        self.upper = K.cast_to_floatx(upper)
+
+    def call(self, inputs):
+        return K.clip(K.sigmoid(inputs), self.lower, self.upper)
+
+    def get_config(self):
+        config = {'lower': float(self.lower), 'upper': float(self.upper)}
+        base_config = super(ThresholdedSigmoid, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
 
 
 class ParamStatsCB(Callback):
@@ -68,6 +86,27 @@ class ParamStatsCB(Callback):
         payload = {'lidx_wstats': self.lidx_wstats, 'lidx_wratio': self.lidx_wratio}
         with open('%s/param_stats.pkl' % self.cpdir, 'wb') as f:
             pkl.dump(payload, f)
+
+
+class TensorBoardWrapper(TensorBoard):
+    '''Sets the self.validation_data property for use with TensorBoard callback.'''
+
+    def __init__(self, batch_gen, nb_steps, **kwargs):
+        super().__init__(**kwargs)
+        self.batch_gen = batch_gen
+        self.nb_steps = nb_steps
+
+    def on_epoch_end(self, epoch, logs):
+        imgs, tags = None, None
+        for s in range(self.nb_steps):
+            ib, tb = next(self.batch_gen)
+            if imgs is None and tags is None:
+                imgs = np.zeros((self.nb_steps * ib.shape[0], *ib.shape[1:]), dtype=np.float32)
+                tags = np.zeros((self.nb_steps * tb.shape[0], *tb.shape[1:]), dtype=np.uint8)
+            imgs[s * ib.shape[0]:(s + 1) * ib.shape[0]] = ib
+            tags[s * tb.shape[0]:(s + 1) * tb.shape[0]] = tb
+        self.validation_data = [imgs, tags, np.ones(imgs.shape[0]), 0.0]
+        return super().on_epoch_end(epoch, logs)
 
 
 class ValidationCB(Callback):

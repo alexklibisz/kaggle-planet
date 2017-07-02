@@ -37,7 +37,7 @@ TAGS_short = [t[:4] for t in TAGS]
 TAGS_idxs = {t: i for i, t in enumerate(TAGS)}
 
 # Mean values per channel computed on train dataset.
-IMG_MEAN_JPG_TRN = (123.7213287353515625, 124.1055145263671875, 107.1297149658203125)
+IMG_MEAN_JPG_TRN = (115.037612915039062, 101.029678344726562, 80.3773040771484375)
 IMG_MEAN_TIF_TRN = (5023.3525390625, 4288.53466796875, 2961.06689453125, 6369.85498046875)
 
 
@@ -132,7 +132,7 @@ def bool_F2(A, B):
 def val_plot_metrics(pickle_path):
     import matplotlib.pyplot as plt
 
-    data = pkl.load(open(pickle_path, "rb") )
+    data = pkl.load(open(pickle_path, "rb"))
 
     # Plot each tag's F2, precision, and recall over time
 
@@ -154,8 +154,8 @@ def val_plot_metrics(pickle_path):
                 mymin = _
         plt.legend([metric for metric in data['tag_metrics'][tag]], loc='lower right')
         plt.title(tag)
-        plt.ylim([mymin,1])
-        
+        plt.ylim([mymin, 1])
+
         plt.show()
 
     return
@@ -167,7 +167,7 @@ def val_plot_predictions(pickle_path):
     darkgreen = '#196419'
     barwidth = 0.45
 
-    data = pkl.load(open(pickle_path, "rb") )
+    data = pkl.load(open(pickle_path, "rb"))
 
     yp = np.asarray(data['yp'])
     yt = np.asarray(data['yt'])
@@ -192,10 +192,9 @@ def val_plot_predictions(pickle_path):
     plt.ylabel("Count")
     plt.show()
 
-
     plt.figure(figsize=(15, 8))
-    plt.bar(xvals-barwidth/2, fp, barwidth, label="False Positives", color=darkgreen)
-    plt.bar(xvals+barwidth/2, fn, barwidth, label="False Negatives", color='black')
+    plt.bar(xvals - barwidth / 2, fp, barwidth, label="False Positives", color=darkgreen)
+    plt.bar(xvals + barwidth / 2, fn, barwidth, label="False Negatives", color='black')
     plt.xticks(xvals, TAGS_short)
     plt.title("False Positives Compared To False Negatives")
     plt.legend()
@@ -203,7 +202,7 @@ def val_plot_predictions(pickle_path):
     plt.show()
 
     plt.figure(figsize=(15, 8))
-    plt.bar(xvals, fp+fn, color=(0.6, 0.1, 0.1))
+    plt.bar(xvals, fp + fn, color=(0.6, 0.1, 0.1))
     plt.xticks(xvals, TAGS_short)
     plt.title("Total Incorrect")
     plt.legend()
@@ -229,17 +228,17 @@ def val_plot_predictions(pickle_path):
     plt.xlabel("Number of Incorrect Labels")
 
     k = 10
-    if k > len(numCorrect)-1:
-        k = len(numCorrect)-1
+    if k > len(numCorrect) - 1:
+        k = len(numCorrect) - 1
 
-    fig, axes = plt.subplots(k, figsize=(15, 8*k))
+    fig, axes = plt.subplots(k, figsize=(15, 8 * k))
     xvals = np.arange(yp.shape[1])
 
     # Get and sort the k lowest indices
     kSmallest = np.argpartition(numCorrect, k)[:k]
     kSmallest = sorted(kSmallest, key=lambda i1: numCorrect[i1])
 
-    colors = [0] *len(TAGS)
+    colors = [0] * len(TAGS)
     for idx, ax in zip(kSmallest, fig.axes):
         points = yp[idx] - yt[idx]
         for i in range(len(points)):
