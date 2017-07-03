@@ -129,6 +129,18 @@ def bool_F2(A, B):
     return (1 + beta**2) * ((p * r) / (beta**2 * p + r + 1e-7))
 
 
+def serialize_config(config):
+    _config = {}
+    for k, v in config.items():
+        if callable(v):
+            _config[k] = v.__name__
+        elif type(v) == np.int64:
+            _config[k] = float(v)
+        else:
+            _config[k] = v
+    return _config
+
+
 def val_plot_metrics(pickle_path):
     import matplotlib.pyplot as plt
 

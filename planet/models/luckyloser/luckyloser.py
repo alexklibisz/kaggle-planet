@@ -121,6 +121,23 @@ def _net_vgg16_pretrained(output=None):
     return _net_vgg16(output, pretrained=True)
 
 
+def _net_resnet50(output=None, input_shape=(200, 200, 3)):
+    from keras.applications.resnet50 import ResNet50
+
+    def mean_subtract_imgs(x):
+        if x.shape[-1] == 3:
+            for c in range(x.shape[-1]):
+                x[:, :, :, c] -= IMG_MEAN_JPG_TRN[c]
+            return x / 255.
+        else:
+            for c in range(x.shape[-1]):
+                x[:, :, :, c] -= IMG_MEAN_TIF_TRN[c]
+            return x / 65535.
+
+    def tags(x):
+        return x
+
+
 def _net_godard(output_func=None, input_shape=(64, 64, 3)):
 
     from planet.utils.data_utils import IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
@@ -155,17 +172,21 @@ def _net_godard(output_func=None, input_shape=(64, 64, 3)):
     x = conv_block(x, 32, 0.1, '02.0')
     x = conv_block(x, 64, 0.1, '02.1')
     x = conv_block(x, 128, 0.1, '02.2')
-    x = conv_block(x, 256, 0.1, '02.3')
-    x = Flatten(name='02.4.flat')(x)
+    x = Flatten(name='02.5.flat')(x)
 
     x = Dense(512, kernel_initializer='he_uniform', name='03.dens.512')(x)
     x = BatchNormalization(momentum=0.1, name='04.bnrm')(x)
     x = PReLU(name='05.prelu')(x)
     x = Dropout(0.1, name='06.drop')(x)
 
-    x = Dense(len(TAGS), kernel_initializer='glorot_uniform', name='07.dense.17')(x)
-    x = BatchNormalization(beta_regularizer=l2(0.0), momentum=0.1, name='08.bnrm')(x)
-    x = Activation('sigmoid', name='09.sigm')(x)
+    # x = Dense(512, kernel_initializer='he_uniform', name='07.dens.512')(x)
+    # x = BatchNormalization(momentum=0.1, name='08.bnrm')(x)
+    # x = PReLU(name='09.prelu')(x)
+    # x = Dropout(0.1, name='10.drop')(x)
+
+    x = Dense(len(TAGS), kernel_initializer='glorot_uniform', name='11.dense.17')(x)
+    x = BatchNormalization(beta_regularizer=l2(0.01), gamma_regularizer=l2(0.01), momentum=0.1, name='12.bnrm')(x)
+    x = Activation('sigmoid', name='13.sigm')(x)
 
     return Model(inputs=input, outputs=x), input_shape, mean_subtract_imgs, tags
 
@@ -201,8 +222,9 @@ class LuckyLoser(object):
             'trn_batch_size': 40,
             'trn_adam_params': {'lr': 0.001},
             'trn_prop_trn': 0.8,
-            'trn_prop_data': 0.3,
-            'trn_monitor_val': False,
+            'trn_prop_data': 0.7,
+            # 'trn_prop_data': 1.0,
+            'trn_monitor_val': True,
 
             # Testing.
             'tst_batch_size': 1000
@@ -265,7 +287,7 @@ class LuckyLoser(object):
         pprint(self.cfg)
 
         cb = [
-            EarlyStopping(monitor='F2', min_delta=0.01, patience=5, verbose=1, mode='max'),
+            EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             TensorBoardWrapper(gen_val, nb_steps=5, log_dir=self.cfg['cpdir'], histogram_freq=1,
                                batch_size=4, write_graph=False, write_grads=True),
             CSVLogger('%s/history.csv' % self.cpdir),
@@ -276,9 +298,9 @@ class LuckyLoser(object):
         ] + callbacks
 
         if self.cfg['trn_monitor_val']:
-            cb.append(ReduceLROnPlateau(monitor='val_F2', factor=0.75, patience=10,
-                                        min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'))
-            cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=10, verbose=1, mode='max'))
+            cb.append(ReduceLROnPlateau(monitor='val_F2', factor=0.1, patience=10,
+                                        min_lr=0.001 epsilon=1e-2, verbose=1, mode='max'))
+            cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=20, verbose=1, mode='max'))
 
         train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'],
                                   verbose=1, callbacks=cb, validation_data=gen_val, validation_steps=steps_val)

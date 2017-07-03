@@ -17,17 +17,6 @@ tf.set_random_seed(1499006546)
 
 def model_runner(model):
 
-    # assert hasattr(model, 'create_net') and callable(model.create_net)
-    # assert hasattr(model, 'predict') and callable(model.predict)
-
-    # assert 'batch_size_trn' in model.config
-    # assert 'batch_size_tst' in model.config
-    # assert 'input_shape' in model.config
-    # assert 'imgs_dir_trn' in model.config
-    # assert 'imgs_csv_trn' in model.config
-    # assert 'imgs_dir_tst' in model.config
-    # assert 'imgs_csv_tst' in model.config
-
     logging.basicConfig(level=logging.INFO)
     model_name = type(model).__name__
     logger = logging.getLogger(model_name)
@@ -45,7 +34,7 @@ def model_runner(model):
     parser_train.set_defaults(which='optimize')
     parser_train.add_argument('-w', '--weights', help='network weights')
 
-    # Optimizing - NOT! - visualizing.
+    # Visualizing.
     parser_train = sub.add_parser('visualize', help='optimizing')
     parser_train.set_defaults(which='visualize')
     parser_train.add_argument('-w', '--weights', help='network weights')

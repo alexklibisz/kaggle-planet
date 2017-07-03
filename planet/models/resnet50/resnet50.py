@@ -1,6 +1,6 @@
 # Godard v2 adapted from LuckyLoser model.
 from itertools import cycle
-from keras.optimizers import Adam
+from keras.optimizers import SGD
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
 from keras.models import Model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
@@ -18,15 +18,15 @@ import os
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import TAGS, correct_tags, get_train_val_idxs, serialize_config
+from planet.utils.data_utils import TAGS, correct_tags, get_train_val_idxs, serialize_config, IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
 from planet.utils.keras_utils import TensorBoardWrapper
 from planet.utils.runtime import funcname
 rng = np.random
 
 
-def _net_godard(input_shape=(96, 96, 3)):
+def _net_resnet50(input_shape=(200, 200, 3)):
 
-    from planet.utils.data_utils import IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
+    from keras.applications.resnet50 import ResNet50
 
     def preprocess_jpg(x):
         for c in range(x.shape[-1]):
@@ -41,45 +41,23 @@ def _net_godard(input_shape=(96, 96, 3)):
     def preprocess_tags(x):
         return x
 
-    input = Input(shape=input_shape, name='00.inpt')
-    x = BatchNormalization(momentum=0.1, name='01.bnrm')(input)
+    res = ResNet50(include_top=False, weights=None, input_shape=(224, 224, 3), pooling='avg')
+    x = res.output
+    x = Dense(len(TAGS), kernel_initializer='glorot_uniform')(x)
+    x = BatchNormalization(beta_regularizer=l2(0.01), gamma_regularizer=l2(0.01), momentum=0.1, name='01.bnrm')(x)
+    x = Activation('sigmoid', name='02.sigm')(x)
 
-    def conv_block(x, f, d, n='00'):
-        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%s.0.conv.%d' % (n, f))(x)
-        x = BatchNormalization(momentum=0.1, name='%s.1.bnrm' % n)(x)
-        x = PReLU(name='%s.2.prelu' % n)(x)
-        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%s.3.conv.%d' % (n, f))(x)
-        x = BatchNormalization(momentum=0.1, name='%s.4.bnrm' % n)(x)
-        x = PReLU(name='%s.5.prelu' % n)(x)
-        x = MaxPooling2D(pool_size=2, name='%s.6.pool' % n)(x)
-        x = Dropout(d, name='%s.7.drop' % n)(x)
-        return x
-
-    x = conv_block(x, 64, 0.1, '02.0')
-    x = conv_block(x, 128, 0.1, '02.1')
-    x = conv_block(x, 256, 0.1, '02.2')
-    x = Flatten(name='02.5.flat')(x)
-
-    x = Dense(512, kernel_initializer='he_uniform', name='03.dens.512')(x)
-    x = BatchNormalization(momentum=0.1, name='04.bnrm')(x)
-    x = PReLU(name='05.prelu')(x)
-    x = Dropout(0.1, name='06.drop')(x)
-
-    x = Dense(len(TAGS), kernel_initializer='glorot_uniform', name='07.dense.17')(x)
-    x = BatchNormalization(beta_regularizer=l2(0.01), gamma_regularizer=l2(0.01), momentum=0.1, name='08.bnrm')(x)
-    x = Activation('sigmoid', name='09.sigm')(x)
-
-    return Model(inputs=input, outputs=x), preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
+    return Model(inputs=res.input, outputs=x), preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
 
 
-class GodardV2(object):
+class ResNet50(object):
 
     def __init__(self):
 
         self.cfg = {
 
             # Data setup.
-            'cpdir': 'checkpoints/godardv2_%d_%d' % (int(time()), os.getpid()),
+            'cpdir': 'checkpoints/ResNet50_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
             'input_shape': (64, 64, 3),
@@ -87,7 +65,7 @@ class GodardV2(object):
             'preprocess_tags_func': lambda x: x,
 
             # Network setup.
-            'net_builder_func': _net_godard,
+            'net_builder_func': _net_resnet50,
             'net_threshold': 0.5,
             'net_loss_func': 'binary_crossentropy',
 
@@ -96,7 +74,7 @@ class GodardV2(object):
             'trn_augment_max_trn': 0,
             'trn_augment_max_val': 0,
             'trn_batch_size': 40,
-            'trn_adam_params': {'lr': 0.001},
+            'trn_sgd_params': {'lr': 0.1, 'momentum': 0.9},
             'trn_prop_trn': 0.8,
             'trn_prop_data': 0.1,
             'trn_monitor_val': False,
@@ -151,7 +129,7 @@ class GodardV2(object):
             sz = K.sum(K.ones_like(yt))
             return (sz - (fp + fn)) / (sz + 1e-7)
 
-        net.compile(optimizer=Adam(**self.cfg['trn_adam_params']), loss=self.cfg['net_loss_func'],
+        net.compile(optimizer=SGD(**self.cfg['trn_sgd_params']), loss=self.cfg['net_loss_func'],
                     metrics=[F2, prec, reca, acc])
 
         net.summary()
@@ -215,4 +193,4 @@ class GodardV2(object):
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
-    model_runner(GodardV2())
+    model_runner(ResNet50())
