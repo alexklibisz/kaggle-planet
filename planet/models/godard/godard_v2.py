@@ -24,6 +24,11 @@ from planet.utils.runtime import funcname
 rng = np.random
 
 
+def _loss_bc(yt, yp):
+    loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
+    return K.mean(loss, axis=-1)
+
+
 def _net_godard(input_shape=(96, 96, 3)):
 
     from planet.utils.data_utils import IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
@@ -45,31 +50,57 @@ def _net_godard(input_shape=(96, 96, 3)):
     x = BatchNormalization(momentum=0.1, name='01.bnrm')(input)
 
     def conv_block(x, f, d, n='00'):
-        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%s.0.conv.%d' % (n, f))(x)
+        x = Conv2D(f, 3, padding='same', kernel_initializer='he_normal', name='%s.0.conv.%d' % (n, f))(x)
         x = BatchNormalization(momentum=0.1, name='%s.1.bnrm' % n)(x)
-        x = PReLU(name='%s.2.prelu' % n)(x)
-        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%s.3.conv.%d' % (n, f))(x)
+        x = Activation('relu', name='%s.2.relu' % n)(x)
+        x = Conv2D(f, 3, padding='same', kernel_initializer='he_normal', name='%s.3.conv.%d' % (n, f))(x)
         x = BatchNormalization(momentum=0.1, name='%s.4.bnrm' % n)(x)
-        x = PReLU(name='%s.5.prelu' % n)(x)
+        x = Activation('relu', name='%s.5.relu' % n)(x)
         x = MaxPooling2D(pool_size=2, name='%s.6.pool' % n)(x)
         x = Dropout(d, name='%s.7.drop' % n)(x)
         return x
 
-    x = conv_block(x, 64, 0.1, '02.0')
-    x = conv_block(x, 128, 0.1, '02.1')
-    x = conv_block(x, 256, 0.1, '02.2')
+    x = conv_block(x, 64, 0.0, '02.0')
+    x = conv_block(x, 128, 0.0, '02.1')
+    x = conv_block(x, 256, 0.0, '02.2')
     x = Flatten(name='02.5.flat')(x)
 
-    x = Dense(512, kernel_initializer='he_uniform', name='03.dens.512')(x)
+    # Shared dense layer.
+    x = Dense(512, kernel_initializer='he_normal', name='03.dens.512')(x)
     x = BatchNormalization(momentum=0.1, name='04.bnrm')(x)
-    x = PReLU(name='05.prelu')(x)
-    x = Dropout(0.1, name='06.drop')(x)
+    x = Activation('relu', name='05.relu')(x)
+    shared = Dropout(0.0, name='06.drop')(x)
 
-    x = Dense(len(TAGS), kernel_initializer='glorot_uniform', name='07.dense.17')(x)
-    x = BatchNormalization(beta_regularizer=l2(0.01), gamma_regularizer=l2(0.01), momentum=0.1, name='08.bnrm')(x)
-    x = Activation('sigmoid', name='09.sigm')(x)
+    # One classifier for the four cloud-cover tags.
+    x = Dense(4, kernel_initializer='glorot_uniform', name='07.clouds.dens')(shared)
+    x = BatchNormalization(momentum=0.1, name='07.clouds.bnrm')(x)
+    out_clouds = Activation('softmax', name='07.clouds.soft')(x)
 
-    return Model(inputs=input, outputs=x), preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
+    # Re-ordered arrangement of tags.
+    net_tags = ['clear', 'cloudy', 'haze', 'partly_cloudy', 'agriculture', 'artisinal_mine',
+                'bare_ground', 'blooming', 'blow_down', 'conventional_mine', 'cultivation',
+                'habitation', 'primary', 'road', 'selective_logging', 'slash_burn', 'water']
+
+    # One softmax classifier for each of the remaining thirteen tags.
+    out_others = []
+    for i, tag in enumerate(net_tags[4:]):
+        x = Dense(2, kernel_initializer='glorot_uniform', name='08.%s.dens' % tag)(shared)
+        x = BatchNormalization(momentum=0.1, name='08.%s.bnrm' % tag)(x)
+        x = Activation('softmax', name='08.%s.soft' % tag)(x)
+        x = Lambda(lambda x: K.expand_dims(x[:, 1]), name='09.%s' % tag)(x)
+        out_others.append(x)
+
+    # Combine the activations.
+    combined = ([None] * 4) + out_others
+    for i, tag in enumerate(net_tags[:4]):
+        x = Lambda(lambda x: K.expand_dims(x[:, i]), name='09.%s' % tag)(out_clouds)
+        combined[i] = x
+    combined += out_others
+
+    # Re-arrange and concatenate them to match the original order.
+    arranged = concatenate([combined[net_tags.index(t)] for t in TAGS], name='10.concat')
+
+    return Model(inputs=input, outputs=arranged), preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
 
 
 class GodardV2(object):
@@ -88,15 +119,15 @@ class GodardV2(object):
 
             # Network setup.
             'net_builder_func': _net_godard,
+            'net_loss_func': _loss_bc,
             'net_threshold': 0.5,
-            'net_loss_func': 'binary_crossentropy',
 
             # Training setup.
             'trn_epochs': 100,
-            'trn_augment_max_trn': 0,
+            'trn_augment_max_trn': 3,
             'trn_augment_max_val': 0,
             'trn_batch_size': 40,
-            'trn_adam_params': {'lr': 0.001},
+            'trn_adam_params': {'lr': 0.0015},
             'trn_prop_trn': 0.8,
             'trn_prop_data': 0.1,
             'trn_monitor_val': False,
@@ -151,8 +182,24 @@ class GodardV2(object):
             sz = K.sum(K.ones_like(yt))
             return (sz - (fp + fn)) / (sz + 1e-7)
 
+        def yppos(yt, yp):
+            ypr = K.cast(yp > self.cfg['net_threshold'], 'float')
+            return K.sum(ypr * yp) / K.sum(K.round(ypr))
+
+        def ypneg(yt, yp):
+            ypr = K.cast(yp > self.cfg['net_threshold'], 'float')
+            yprneg = K.abs(ypr - 1)
+            return K.sum(yprneg * yp) / K.sum(yprneg)
+
+        def ytmean(yt, yp):
+            return K.mean(yt)
+
+        def ypmean(yt, yp):
+            yp = K.cast(yp > self.cfg['net_threshold'], 'float')
+            return K.mean(yp)
+
         net.compile(optimizer=Adam(**self.cfg['trn_adam_params']), loss=self.cfg['net_loss_func'],
-                    metrics=[F2, prec, reca, acc])
+                    metrics=[F2, prec, reca, acc, yppos, ypneg, ytmean, ypmean])
 
         net.summary()
         if weights_path is not None:
@@ -161,8 +208,8 @@ class GodardV2(object):
 
         cb = [
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
-            TensorBoardWrapper(gen_val, nb_steps=10, log_dir=self.cfg['cpdir'], histogram_freq=1,
-                               batch_size=4, write_graph=False, write_grads=True),
+            # TensorBoardWrapper(gen_val, nb_steps=2, log_dir=self.cfg['cpdir'], histogram_freq=1,
+            #                    batch_size=4, write_graph=False, write_grads=True),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),

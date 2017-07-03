@@ -1,6 +1,6 @@
 # Godard v2 adapted from LuckyLoser model.
 from itertools import cycle
-from keras.optimizers import SGD
+from keras.optimizers import SGD, Adam
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
 from keras.models import Model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
@@ -41,11 +41,14 @@ def _net_resnet50(input_shape=(200, 200, 3)):
     def preprocess_tags(x):
         return x
 
-    res = ResNet50(include_top=False, weights=None, input_shape=(224, 224, 3), pooling='avg')
+    res = ResNet50(include_top=False, weights='imagenet', input_shape=input_shape, pooling='avg')
     x = res.output
     x = Dense(len(TAGS), kernel_initializer='glorot_uniform')(x)
-    x = BatchNormalization(beta_regularizer=l2(0.01), gamma_regularizer=l2(0.01), momentum=0.1, name='01.bnrm')(x)
+    x = BatchNormalization(beta_regularizer=l2(0.005), gamma_regularizer=l2(0.005), momentum=0.1, name='01.bnrm')(x)
     x = Activation('sigmoid', name='02.sigm')(x)
+
+    import pdb
+    pdb.set_trace()
 
     return Model(inputs=res.input, outputs=x), preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
 
@@ -60,7 +63,7 @@ class ResNet50(object):
             'cpdir': 'checkpoints/ResNet50_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
-            'input_shape': (64, 64, 3),
+            'input_shape': (200, 200, 3),
             'preprocess_imgs_func': lambda x: x,
             'preprocess_tags_func': lambda x: x,
 
@@ -74,10 +77,13 @@ class ResNet50(object):
             'trn_augment_max_trn': 0,
             'trn_augment_max_val': 0,
             'trn_batch_size': 40,
-            'trn_sgd_params': {'lr': 0.1, 'momentum': 0.9},
+            'trn_optimizer': SGD,
+            'trn_optimizer_args': {'lr': 0.0001, 'momentum': 0.9},
+            # 'trn_optimizer': Adam,
+            # 'trn_optimizer_args': {'lr': 0.01},
             'trn_prop_trn': 0.8,
-            'trn_prop_data': 0.1,
-            'trn_monitor_val': False,
+            'trn_prop_data': 1.0,
+            'trn_monitor_val': True,
 
             # Testing.
             'tst_batch_size': 1000
@@ -129,8 +135,17 @@ class ResNet50(object):
             sz = K.sum(K.ones_like(yt))
             return (sz - (fp + fn)) / (sz + 1e-7)
 
-        net.compile(optimizer=SGD(**self.cfg['trn_sgd_params']), loss=self.cfg['net_loss_func'],
-                    metrics=[F2, prec, reca, acc])
+        def yppos(yt, yp):
+            ypr = K.round(yp)
+            return K.sum(ypr * yp) / K.sum(K.round(ypr))
+
+        def ypneg(yt, yp):
+            ypr = K.round(yp)
+            yprneg = K.abs(ypr - 1)
+            return K.sum(yprneg * yp) / K.sum(yprneg)
+
+        net.compile(optimizer=self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args']), loss=self.cfg['net_loss_func'],
+                    metrics=[F2, prec, reca, acc, yppos, ypneg])
 
         net.summary()
         if weights_path is not None:
@@ -139,8 +154,8 @@ class ResNet50(object):
 
         cb = [
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
-            TensorBoardWrapper(gen_val, nb_steps=10, log_dir=self.cfg['cpdir'], histogram_freq=1,
-                               batch_size=4, write_graph=False, write_grads=True),
+            # TensorBoardWrapper(gen_val, nb_steps=10, log_dir=self.cfg['cpdir'], histogram_freq=1,
+            #                    batch_size=4, write_graph=False, write_grads=True),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),

@@ -86,8 +86,6 @@ def _loss_mse(yt, yp):
 def _loss_mae(yt, yp):
     return K.mean(K.abs(yt - yp), axis=-1)
 
-losses = [_loss_bcr, _loss_mse]
-
 
 def _net_vgg19(output=None, pretrained=False):
 

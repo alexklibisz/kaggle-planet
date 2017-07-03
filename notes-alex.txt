@@ -1,10 +1,22 @@
 7/3/17
 
-- Godard-V2
+- Godard-V2 with sigmoids
     - Godard with sigmoid outputs seems to improve when you decrease depth. Using 3 conv/prelu/conv/prelu/pooling blocks and one 512-dense prelu layer ends up plateauing around F2=0.89, whereas doing 5 conv blocks and two 512-dense layers plateaus around F2=0.86. This might be indicative of the same phenomenon that motivated the Residual architecture.
     - Increasing the beta and gamma regularization on the last batch norm layer before the sigmoid layer creates a significant shift in the sigmoid outputs. With no regularization, the sigmoid outputs quickly reach modes at 0.0 and 1.0. With l2(0.001), they have modes at 0.1 and 0.9, with l2(0.01), they have modes at 0.3 and 0.7. In principle, this should help the network to continue learning longer by preventing the sigmoid layer from saturating and having 0 gradients.
     - Even with less extreme sigmoid outputs, I still haven't found a way around the very peaky, almost-zero gradients.
     - Increasing the number of filters in the convolutional layers seems to drastically increase the distribution of gradients. When trained with 1/10th of the data, it reaches F2=0.93 in fifteen epochs. val F2 lags way behind at 0.81, which shows it has the capacity to overfit.
+        - 64-128-256 blocks reach F2 0.88 with 0.5 data in 11 epochs.
+    - Sigmoids seem to learn a high precision before high recall. Godard V2 with full data has precision 0.92 and recall 0.85 at epoch 13. ResNet50 with full data has precision 0.89 and recall 0.79 at epoch 7.
+
+- Summarizing sigmoids for Godard
+    - Still concerning that the sigmoid outputs are so sensitive to the last batchnorm output, but it makes sense.
+    - There seems to be a clear advantage to having fewer layers between the input and sigmoid output. Adding more filters to compensate doesn't seem to affect it.
+    - Doesn't seem to be any clear advantage or disadvantage ot having PReLUs.
+    - The gradient seems to always peak right at zero (i.e. mode at zero). This is concerning and would hopefully be alleviated by another output activation.
+
+- Godard-V2 with 4/13 softmax
+    - This refers to using a single 4-node dense layer with softmax activation for the cloud cover, and 13 separate binary softmax layers for the remaining 13 classes.
+    - A model with 64-128-256 conv blocks, 512 dense, learning rate 0.0015, 0.1 data reaches F2=0.97 in 78 epochs.
 
 - ResNet50
     - Trying ResNet50 again after watching the CS231n lecture where Karpathy explains the motivation for this model. I think it might help alleviate some of the tiny-gradient issues with Godard-Sigmoid.
