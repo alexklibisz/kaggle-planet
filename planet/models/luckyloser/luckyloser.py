@@ -1,11 +1,11 @@
 # Let's just try some random shit.
 from itertools import cycle
 from keras.optimizers import Adam
-from keras.models import Model
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
+from keras.models import Model
 from keras.utils import plot_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
-from keras.layers.advanced_activations import PReLU, ELU
+from keras.layers.advanced_activations import PReLU
 from keras.losses import binary_crossentropy
 from keras.regularizers import l2
 from pprint import pprint
@@ -121,49 +121,51 @@ def _net_vgg16_pretrained(output=None):
     return _net_vgg16(output, pretrained=True)
 
 
-def _net_godard(output_func=None, input_shape=None):
+def _net_godard(output_func=None, input_shape=(64, 64, 3)):
 
-    from planet.utils.data_utils import IMG_MEAN_JPG_TRN
+    from planet.utils.data_utils import IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
 
     def mean_subtract_imgs(x):
-        for c in range(x.shape[-1]):
-            x[:, :, :, c] -= IMG_MEAN_JPG_TRN[c]
-        d = 255. if x.shape[-1] == 3 else 65535
-        return x / d
+        if x.shape[-1] == 3:
+            for c in range(x.shape[-1]):
+                x[:, :, :, c] -= IMG_MEAN_JPG_TRN[c]
+            return x / 255.
+        else:
+            for c in range(x.shape[-1]):
+                x[:, :, :, c] -= IMG_MEAN_TIF_TRN[c]
+            return x / 65535.
 
     def tags(x):
         return x
 
-    input = Input(shape=input_shape if input_shape is not None else (64, 64, 3), name='00.input')
-    x = BatchNormalization(momentum=0.1, input_shape=input_shape, name='01.Bnrm')(input)
+    input = Input(shape=input_shape, name='00.inpt')
+    x = BatchNormalization(momentum=0.1, name='01.bnrm')(input)
 
-    def conv_block(x, f, n):
-        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%02d.0.Conv2D%d' % (n, f))(x)
-        x = BatchNormalization(momentum=0.1, name='%02d.1.Bnrm' % n)(x)
-        x = Activation('relu', name='%02d.2.ReLU' % n)(x)
-        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%02d.3.Conv2D%d' % (n, f))(x)
-        x = BatchNormalization(momentum=0.1, name='%02d.4.Bnrm' % n)(x)
-        x = Activation('relu', name='%02d.5.ReLU' % n)(x)
-        x = MaxPooling2D(pool_size=2, name='%02d.6.MaxPool' % n)(x)
-        x = Dropout(0.0, name='%02d.7.MaxPool' % n)(x)
+    def conv_block(x, f, d, n='00'):
+        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%s.0.conv.%d' % (n, f))(x)
+        x = BatchNormalization(momentum=0.1, name='%s.1.bnrm' % n)(x)
+        x = PReLU(name='%s.2.prelu' % n)(x)
+        x = Conv2D(f, 3, padding='same', kernel_initializer='he_uniform', name='%s.3.conv.%d' % (n, f))(x)
+        x = BatchNormalization(momentum=0.1, name='%s.4.bnrm' % n)(x)
+        x = PReLU(name='%s.5.prelu' % n)(x)
+        x = MaxPooling2D(pool_size=2, name='%s.6.pool' % n)(x)
+        x = Dropout(d, name='%s.7.drop' % n)(x)
         return x
 
-    x = conv_block(x, 32, 2)
-    x = conv_block(x, 64, 3)
-    x = conv_block(x, 128, 4)
-    x = conv_block(x, 256, 5)
+    x = conv_block(x, 32, 0.1, '02.0')
+    x = conv_block(x, 64, 0.1, '02.1')
+    x = conv_block(x, 128, 0.1, '02.2')
+    x = conv_block(x, 256, 0.1, '02.3')
+    x = Flatten(name='02.4.flat')(x)
 
-    x = Flatten(name='06.Flat')(x)
-    x = Dense(512, name='07.Dens512', kernel_initializer='he_uniform')(x)
-    x = BatchNormalization(momentum=0.1, name='09.Bnrm')(x)
-    x = Activation('relu', name='08.ReLU')(x)
-    x = Dropout(0.0, name='10.Drop')(x)
-    x = Dense(len(TAGS), name='11.Dens17', kernel_initializer='glorot_uniform')(x)
-    x = BatchNormalization(beta_regularizer=l2(0.1), momentum=0.1, name='12.Bnrm')(x)
+    x = Dense(512, kernel_initializer='he_uniform', name='03.dens.512')(x)
+    x = BatchNormalization(momentum=0.1, name='04.bnrm')(x)
+    x = PReLU(name='05.prelu')(x)
+    x = Dropout(0.1, name='06.drop')(x)
 
-    # Regular or thresholded sigmoid. In both cases, the gradient is very close to zero.
-    x = Activation('sigmoid', name='13.Sigm')(x)
-    # x = ThresholdedSigmoid(lower=0.2, upper=0.8, name='13.Sigm')(x)
+    x = Dense(len(TAGS), kernel_initializer='glorot_uniform', name='07.dense.17')(x)
+    x = BatchNormalization(beta_regularizer=l2(0.0), momentum=0.1, name='08.bnrm')(x)
+    x = Activation('sigmoid', name='09.sigm')(x)
 
     return Model(inputs=input, outputs=x), input_shape, mean_subtract_imgs, tags
 
@@ -182,7 +184,7 @@ class LuckyLoser(object):
             'cpdir': 'checkpoints/luckyloser_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
-            'input_shape': (64, 64, 3),
+            'input_shape': (96, 96, 3),
             'preprocess_imgs_func': None,
             'preprocess_tags_func': None,
 
@@ -194,12 +196,12 @@ class LuckyLoser(object):
 
             # Training setup.
             'trn_epochs': 100,
-            'trn_augment_max_trn': 2,
+            'trn_augment_max_trn': 5,
             'trn_augment_max_val': 1,
             'trn_batch_size': 40,
             'trn_adam_params': {'lr': 0.001},
             'trn_prop_trn': 0.8,
-            'trn_prop_data': 0.5,
+            'trn_prop_data': 0.3,
             'trn_monitor_val': False,
 
             # Testing.
@@ -261,15 +263,11 @@ class LuckyLoser(object):
         if weights_path is not None:
             net.load_weights(weights_path)
         pprint(self.cfg)
-        sleep(5)
 
         cb = [
-            # ValidationCB(self.cpdir, gen_val, self.cfg['trn_batch_size'], steps_val,
-            #              threshold=self.cfg['net_threshold']),
-            # HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=5, verbose=1, mode='max'),
             TensorBoardWrapper(gen_val, nb_steps=5, log_dir=self.cfg['cpdir'], histogram_freq=1,
-                               batch_size=self.cfg['trn_batch_size'], write_graph=False, write_grads=True),
+                               batch_size=4, write_graph=False, write_grads=True),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
@@ -319,12 +317,6 @@ class LuckyLoser(object):
                     for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max)):
                         ib[bidx] = aug(ib[bidx])
 
-                    # import matplotlib.pyplot as plt
-                    # print(didx, [TAGS[i] for i, v in enumerate(tb[bidx]) if v == 1])
-                    # fig, _ = plt.subplots(1, 2)
-                    # fig.axes[0].imshow(imgs.get(str(didx))[...])
-                    # fig.axes[1].imshow(ib[bidx])
-                    # plt.show()
                 yield self.cfg['preprocess_imgs_func'](ib), self.cfg['preprocess_tags_func'](tb)
 
 if __name__ == "__main__":

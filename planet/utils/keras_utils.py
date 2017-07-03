@@ -14,6 +14,18 @@ import pickle as pkl
 from planet.utils.data_utils import TAGS
 
 
+def pretty_names(model):
+    '''Renames the layers so they are easier to distinguish in Tensorboard.'''
+    for i, l in enumerate(model.layers):
+        type_ = l.get_config()['activation'] if type(l).__name__ == 'Activation' else type(l).__name__
+        shape = 'x'.join([str(d) for d in l.output_shape[1:]])
+        model.layers[i].name = '%02d.%s.%s' % (i, type_, shape)
+    import pdb
+    pdb.set_trace()
+
+    return model
+
+
 class ThresholdedSigmoid(Layer):
 
     def __init__(self, lower=0.2, upper=0.8, **kwargs):
@@ -214,3 +226,10 @@ class HistoryPlotCB(Callback):
         else:
             plt.show()
             plt.close()
+
+
+def name_layers(model):
+    '''Gives the layers sensible names in alphabetical order for use with Tensorboard.'''
+    model.layers[0].name = 'name_layers'
+    import pdb
+    pdb.set_trace()
