@@ -52,24 +52,24 @@ def _net_godard(input_shape=(96, 96, 3)):
     def conv_block(x, f, d, n='00'):
         x = Conv2D(f, 3, padding='same', kernel_initializer='he_normal', name='%s.0.conv.%d' % (n, f))(x)
         x = BatchNormalization(momentum=0.1, name='%s.1.bnrm' % n)(x)
-        x = Activation('relu', name='%s.2.relu' % n)(x)
+        x = PReLU(name='%s.2.prelu' % n)(x)
         x = Conv2D(f, 3, padding='same', kernel_initializer='he_normal', name='%s.3.conv.%d' % (n, f))(x)
         x = BatchNormalization(momentum=0.1, name='%s.4.bnrm' % n)(x)
-        x = Activation('relu', name='%s.5.relu' % n)(x)
+        x = PReLU(name='%s.5.prelu' % n)(x)
         x = MaxPooling2D(pool_size=2, name='%s.6.pool' % n)(x)
         x = Dropout(d, name='%s.7.drop' % n)(x)
         return x
 
-    x = conv_block(x, 64, 0.0, '02.0')
-    x = conv_block(x, 128, 0.0, '02.1')
-    x = conv_block(x, 256, 0.0, '02.2')
+    x = conv_block(x, 100, 0.2, '02.0')
+    x = conv_block(x, 150, 0.2, '02.1')
+    x = conv_block(x, 200, 0.2, '02.2')
     x = Flatten(name='02.5.flat')(x)
 
     # Shared dense layer.
     x = Dense(512, kernel_initializer='he_normal', name='03.dens.512')(x)
     x = BatchNormalization(momentum=0.1, name='04.bnrm')(x)
-    x = Activation('relu', name='05.relu')(x)
-    shared = Dropout(0.0, name='06.drop')(x)
+    x = PReLU(name='05.prelu')(x)
+    shared = Dropout(0.2, name='06.drop')(x)
 
     # One classifier for the four cloud-cover tags.
     x = Dense(4, kernel_initializer='glorot_uniform', name='07.clouds.dens')(shared)
@@ -83,7 +83,7 @@ def _net_godard(input_shape=(96, 96, 3)):
 
     # One softmax classifier for each of the remaining thirteen tags.
     out_others = []
-    for i, tag in enumerate(net_tags[4:]):
+    for tag in net_tags[4:]:
         x = Dense(2, kernel_initializer='glorot_uniform', name='08.%s.dens' % tag)(shared)
         x = BatchNormalization(momentum=0.1, name='08.%s.bnrm' % tag)(x)
         x = Activation('softmax', name='08.%s.soft' % tag)(x)
@@ -91,10 +91,10 @@ def _net_godard(input_shape=(96, 96, 3)):
         out_others.append(x)
 
     # Combine the activations.
-    combined = ([None] * 4) + out_others
+    combined = []
     for i, tag in enumerate(net_tags[:4]):
         x = Lambda(lambda x: K.expand_dims(x[:, i]), name='09.%s' % tag)(out_clouds)
-        combined[i] = x
+        combined.append(x)
     combined += out_others
 
     # Re-arrange and concatenate them to match the original order.
@@ -113,7 +113,7 @@ class GodardV2(object):
             'cpdir': 'checkpoints/godardv2_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
-            'input_shape': (64, 64, 3),
+            'input_shape': (100, 100, 3),
             'preprocess_imgs_func': lambda x: x,
             'preprocess_tags_func': lambda x: x,
 
@@ -124,13 +124,13 @@ class GodardV2(object):
 
             # Training setup.
             'trn_epochs': 100,
-            'trn_augment_max_trn': 3,
-            'trn_augment_max_val': 0,
+            'trn_augment_max_trn': 5,
+            'trn_augment_max_val': 1,
             'trn_batch_size': 40,
             'trn_adam_params': {'lr': 0.0015},
             'trn_prop_trn': 0.8,
-            'trn_prop_data': 0.1,
-            'trn_monitor_val': False,
+            'trn_prop_data': 1.0,
+            'trn_monitor_val': True,
 
             # Testing.
             'tst_batch_size': 1000
@@ -176,12 +176,6 @@ class GodardV2(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        def acc(yt, yp):
-            fp = K.sum(K.clip(yp - yt, 0, 1))
-            fn = K.sum(K.clip(yt - yp, 0, 1))
-            sz = K.sum(K.ones_like(yt))
-            return (sz - (fp + fn)) / (sz + 1e-7)
-
         def yppos(yt, yp):
             ypr = K.cast(yp > self.cfg['net_threshold'], 'float')
             return K.sum(ypr * yp) / K.sum(K.round(ypr))
@@ -199,7 +193,7 @@ class GodardV2(object):
             return K.mean(yp)
 
         net.compile(optimizer=Adam(**self.cfg['trn_adam_params']), loss=self.cfg['net_loss_func'],
-                    metrics=[F2, prec, reca, acc, yppos, ypneg, ytmean, ypmean])
+                    metrics=[F2, prec, reca, yppos, ypneg, ytmean, ypmean])
 
         net.summary()
         if weights_path is not None:
@@ -208,8 +202,8 @@ class GodardV2(object):
 
         cb = [
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
-            # TensorBoardWrapper(gen_val, nb_steps=2, log_dir=self.cfg['cpdir'], histogram_freq=1,
-            #                    batch_size=4, write_graph=False, write_grads=True),
+            TensorBoardWrapper(gen_val, nb_steps=2, log_dir=self.cfg['cpdir'], histogram_freq=1,
+                               batch_size=4, write_graph=False, write_grads=True),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),

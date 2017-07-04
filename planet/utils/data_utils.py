@@ -38,7 +38,7 @@ TAGS_idxs = {t: i for i, t in enumerate(TAGS)}
 
 # Mean values per channel computed on train dataset.
 IMG_MEAN_JPG_TRN = (79.4163863379, 86.8384090525, 76.201647143)
-IMG_MEAN_TIF_TRN = (5023.3525390625, 4288.53466796875, 2961.06689453125, 6369.85498046875)
+IMG_MEAN_TIF_TRN = (4988.75696302, 4270.74552695, 3074.87909779, 6398.84897763)
 
 
 def tag_proportions(csvpath='data/train_v2.csv'):

@@ -24,6 +24,11 @@ from planet.utils.runtime import funcname
 rng = np.random
 
 
+def _loss_bc(yt, yp):
+    loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
+    return K.mean(loss, axis=-1)
+
+
 def _net_resnet50(input_shape=(200, 200, 3)):
 
     from keras.applications.resnet50 import ResNet50
@@ -43,14 +48,46 @@ def _net_resnet50(input_shape=(200, 200, 3)):
 
     res = ResNet50(include_top=False, weights='imagenet', input_shape=input_shape, pooling='avg')
     x = res.output
-    x = Dense(len(TAGS), kernel_initializer='glorot_uniform')(x)
-    x = BatchNormalization(beta_regularizer=l2(0.005), gamma_regularizer=l2(0.005), momentum=0.1, name='01.bnrm')(x)
-    x = Activation('sigmoid', name='02.sigm')(x)
+    x = Dense(2048, kernel_initializer='glorot_uniform', name='01.0.dens.2048')(x)
+    x = BatchNormalization(momentum=0.1, name='01.1.bnrm')(x)
+    x = PReLU(name='01.2.prelu')(x)
+    shared = x
 
-    import pdb
-    pdb.set_trace()
+    # One classifier for the four cloud-cover tags.
+    x = Dense(4, kernel_initializer='glorot_uniform', name='02.clouds.dens')(shared)
+    x = BatchNormalization(momentum=0.1, name='02.clouds.bnrm')(x)
+    out_clouds = Activation('softmax', name='02.clouds.soft')(x)
 
-    return Model(inputs=res.input, outputs=x), preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
+    # Re-ordered arrangement of tags.
+    net_tags = ['clear', 'cloudy', 'haze', 'partly_cloudy', 'agriculture', 'artisinal_mine',
+                'bare_ground', 'blooming', 'blow_down', 'conventional_mine', 'cultivation',
+                'habitation', 'primary', 'road', 'selective_logging', 'slash_burn', 'water']
+
+    # One softmax classifier for each of the remaining thirteen tags.
+    out_others = []
+    for tag in net_tags[4:]:
+        x = Dense(2, kernel_initializer='glorot_uniform', name='08.%s.dens' % tag)(shared)
+        x = BatchNormalization(momentum=0.1, name='08.%s.bnrm' % tag)(x)
+        x = Activation('softmax', name='08.%s.soft' % tag)(x)
+        x = Lambda(lambda x: K.expand_dims(x[:, 1]), name='09.%s' % tag)(x)
+        out_others.append(x)
+
+    # Combine the activations.
+    combined = []
+    for i, tag in enumerate(net_tags[:4]):
+        x = Lambda(lambda x: K.expand_dims(x[:, i]), name='09.%s' % tag)(out_clouds)
+        combined.append(x)
+    combined += out_others
+
+    # Re-arrange and concatenate them to match the original order.
+    arranged = concatenate([combined[net_tags.index(t)] for t in TAGS], name='10.concat')
+
+    # Create model and freeze all ResNet50 layers.
+    model = Model(inputs=res.input, outputs=arranged)
+    for l in model.layers[:len(res.layers)]:
+        l.trainable = False
+
+    return model, preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
 
 
 class ResNet50(object):
@@ -63,24 +100,24 @@ class ResNet50(object):
             'cpdir': 'checkpoints/ResNet50_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
-            'input_shape': (200, 200, 3),
+            'input_shape': (197, 197, 3),
             'preprocess_imgs_func': lambda x: x,
             'preprocess_tags_func': lambda x: x,
 
             # Network setup.
             'net_builder_func': _net_resnet50,
             'net_threshold': 0.5,
-            'net_loss_func': 'binary_crossentropy',
+            'net_loss_func': _loss_bc,
 
             # Training setup.
             'trn_epochs': 100,
-            'trn_augment_max_trn': 0,
-            'trn_augment_max_val': 0,
+            'trn_augment_max_trn': 5,
+            'trn_augment_max_val': 1,
             'trn_batch_size': 40,
-            'trn_optimizer': SGD,
-            'trn_optimizer_args': {'lr': 0.0001, 'momentum': 0.9},
-            # 'trn_optimizer': Adam,
-            # 'trn_optimizer_args': {'lr': 0.01},
+            # 'trn_optimizer': SGD,
+            # 'trn_optimizer_args': {'lr': 0.0001, 'momentum': 0.9},
+            'trn_optimizer': Adam,
+            'trn_optimizer_args': {'lr': 0.001},
             'trn_prop_trn': 0.8,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
@@ -104,8 +141,8 @@ class ResNet50(object):
         json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
 
         # Data setup.
-        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], prop_data=self.cfg['trn_prop_data'],
-                                                prop_trn=self.cfg['trn_prop_trn'])
+        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], self.cfg['trn_prop_data'],
+                                                self.cfg['trn_prop_trn'])
         steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
         steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
         gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
@@ -129,12 +166,6 @@ class ResNet50(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        def acc(yt, yp):
-            fp = K.sum(K.clip(yp - yt, 0, 1))
-            fn = K.sum(K.clip(yt - yp, 0, 1))
-            sz = K.sum(K.ones_like(yt))
-            return (sz - (fp + fn)) / (sz + 1e-7)
-
         def yppos(yt, yp):
             ypr = K.round(yp)
             return K.sum(ypr * yp) / K.sum(K.round(ypr))
@@ -144,8 +175,15 @@ class ResNet50(object):
             yprneg = K.abs(ypr - 1)
             return K.sum(yprneg * yp) / K.sum(yprneg)
 
+        def ytmean(yt, yp):
+            return K.mean(yt)
+
+        def ypmean(yt, yp):
+            yp = K.cast(yp > self.cfg['net_threshold'], 'float')
+            return K.mean(yp)
+
         net.compile(optimizer=self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args']), loss=self.cfg['net_loss_func'],
-                    metrics=[F2, prec, reca, acc, yppos, ypneg])
+                    metrics=[F2, prec, reca, yppos, ypneg, ytmean, ypmean])
 
         net.summary()
         if weights_path is not None:
@@ -154,12 +192,12 @@ class ResNet50(object):
 
         cb = [
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
-            # TensorBoardWrapper(gen_val, nb_steps=10, log_dir=self.cfg['cpdir'], histogram_freq=1,
-            #                    batch_size=4, write_graph=False, write_grads=True),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
-            TerminateOnNaN()
+            TerminateOnNaN(),
+            # TensorBoardWrapper(gen_val, nb_steps=10, log_dir=self.cfg['cpdir'], histogram_freq=1,
+            #                    batch_size=4, write_graph=False, write_grads=True),
 
         ] + callbacks
 
