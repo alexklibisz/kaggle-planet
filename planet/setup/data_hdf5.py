@@ -1,6 +1,6 @@
 # Converts dataset (imgs + csv file with tags) into HDF5 format containing its images and tags.
 # Also prints out the mean for each channel.
-# With a ~3 year old SSD, jpgs read at ~3000/s and tifs at ~
+# With a ~3 year old SSD, jpgs read at ~3000/s and tifs at ~400/s.
 from glob import glob
 from PIL import Image
 from tqdm import tqdm

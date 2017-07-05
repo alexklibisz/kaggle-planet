@@ -1,6 +1,6 @@
 # Godard v2 adapted from LuckyLoser model.
 from itertools import cycle
-from keras.optimizers import Adam
+from keras.optimizers import SGD, Adam
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
 from keras.models import Model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
@@ -8,6 +8,7 @@ from keras.layers.advanced_activations import PReLU
 from keras.regularizers import l2
 from pprint import pprint
 from scipy.misc import imresize
+from scipy.ndimage.interpolation import rotate
 from time import sleep, time
 import json
 import h5py
@@ -18,29 +19,44 @@ import os
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import TAGS, correct_tags, get_train_val_idxs, serialize_config
-from planet.utils.keras_utils import TensorBoardWrapper
+from planet.utils.data_utils import TAGS, correct_tags, get_train_val_idxs, serialize_config, IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
+from planet.utils.keras_utils import TensorBoardWrapper, HistoryPlotCB
 from planet.utils.runtime import funcname
 rng = np.random
+
+
+class FineTuneCB(Callback):
+
+    def __init__(self, unfreeze_after=5, unfreeze_lr_mult=0.5):
+        super().__init__()
+        self.unfreeze_after = unfreeze_after
+        self.unfreeze_lr_mult = unfreeze_lr_mult
+
+    def on_epoch_begin(self, epoch, logs):
+        if epoch == self.unfreeze_after:
+            for layer in self.model.layers:
+                layer.trainable = True
+            lr = K.get_value(self.model.optimizer.lr) * self.unfreeze_lr_mult
+            K.set_value(self.model.optimizer.lr, lr)
 
 
 def _loss_bc(yt, yp):
 
     # Standard log loss.
     loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
+    # return K.mean(loss, axis=-1)
 
     # Compute weight matrix, scaled by the error at each tag.
     fnmax = 20.
-    fnmat = K.clip(K.clip(yt - yp, 0, 1) * fnmax, 1, fnmax)
+    fnmat = K.clip(yt - yp, 0, 1) * fnmax
     fpmat = K.abs(yt - 1)
     wmat = fnmat + fpmat
-
     return K.mean(loss * wmat, axis=-1)
 
 
-def _net_godard(input_shape=(96, 96, 3)):
+def _net_resnet50(input_shape=(200, 200, 3)):
 
-    from planet.utils.data_utils import IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
+    from keras.applications.resnet50 import ResNet50
 
     def preprocess_jpg(x):
         for c in range(x.shape[-1]):
@@ -55,85 +71,51 @@ def _net_godard(input_shape=(96, 96, 3)):
     def preprocess_tags(x):
         return x
 
-    input = Input(shape=input_shape, name='00.inpt')
-    x = BatchNormalization(momentum=0.1, name='01.bnrm')(input)
+    res = ResNet50(include_top=False, weights='imagenet', input_shape=input_shape, pooling='avg')
+    x = res.output
+    x = Dropout(0.1)(x)
 
-    def conv_block(x, f, d, n='00'):
-        x = Conv2D(f, 3, padding='same', kernel_initializer='he_normal', name='%s.0.conv.%d' % (n, f))(x)
-        x = BatchNormalization(momentum=0.1, name='%s.1.bnrm' % n)(x)
-        x = PReLU(name='%s.2.prelu' % n)(x)
-        x = Conv2D(f, 3, padding='same', kernel_initializer='he_normal', name='%s.3.conv.%d' % (n, f))(x)
-        x = BatchNormalization(momentum=0.1, name='%s.4.bnrm' % n)(x)
-        x = PReLU(name='%s.5.prelu' % n)(x)
-        x = MaxPooling2D(pool_size=2, name='%s.6.pool' % n)(x)
-        x = Dropout(d, name='%s.7.drop' % n)(x)
-        return x
+    # 17-sigmoid classification layer. Activity regularization to hopefully prevent saturation.
+    x = Dropout(0.1)(x)
+    x = Dense(len(TAGS), activity_regularizer=l2(0.00001))(x)
+    x = Activation('sigmoid')(x)
+    model = Model(inputs=res.input, outputs=x)
 
-    x = conv_block(x, 64, 0.2, '02.0')
-    x = conv_block(x, 128, 0.2, '02.1')
-    x = conv_block(x, 256, 0.5, '02.2')
-    x = Flatten(name='02.3.flat')(x)
+    # Initially freeze the resnet layers.
+    for l in model.layers[:len(res.layers)]:
+        l.trainable = False
 
-    # Shared dense layer.
-    x = Dense(512, kernel_initializer='he_normal', name='03.dens.512')(x)
-    x = PReLU(name='05.prelu')(x)
-    shared = Dropout(0.2, name='06.drop')(x)
-
-    # One classifier for the four cloud-cover tags.
-    x = Dense(4, kernel_initializer='he_normal', name='07.clouds.dens')(shared)
-    out_clouds = Activation('softmax', name='07.clouds.soft')(x)
-
-    # Re-ordered arrangement of tags.
-    net_tags = ['clear', 'cloudy', 'haze', 'partly_cloudy', 'agriculture', 'artisinal_mine',
-                'bare_ground', 'blooming', 'blow_down', 'conventional_mine', 'cultivation',
-                'habitation', 'primary', 'road', 'selective_logging', 'slash_burn', 'water']
-
-    # One softmax classifier for each of the remaining thirteen tags.
-    out_others = []
-    for tag in net_tags[4:]:
-        x = Dense(2, kernel_initializer='he_normal', name='08.%s.dens' % tag)(shared)
-        x = Activation('softmax', name='08.%s.soft' % tag)(x)
-        x = Lambda(lambda x: K.expand_dims(x[:, 1]), name='09.%s' % tag)(x)
-        out_others.append(x)
-
-    # Combine the activations.
-    combined = []
-    for i, tag in enumerate(net_tags[:4]):
-        x = Lambda(lambda x: K.expand_dims(x[:, i]), name='09.%s' % tag)(out_clouds)
-        combined.append(x)
-    combined += out_others
-
-    # Re-arrange and concatenate them to match the original order.
-    arranged = concatenate([combined[net_tags.index(t)] for t in TAGS], name='10.concat')
-
-    return Model(inputs=input, outputs=arranged), preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
+    return model, preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
 
 
-class GodardV2(object):
+class ResNet50(object):
 
     def __init__(self):
 
         self.cfg = {
 
             # Data setup.
-            'cpdir': 'checkpoints/godardv2_%d_%d' % (int(time()), os.getpid()),
+            'cpdir': 'checkpoints/ResNet50_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
-            'input_shape': (100, 100, 3),
+            'input_shape': (197, 197, 3),
             'preprocess_imgs_func': lambda x: x,
             'preprocess_tags_func': lambda x: x,
 
             # Network setup.
-            'net_builder_func': _net_godard,
-            'net_loss_func': _loss_bc,
+            'net_builder_func': _net_resnet50,
             'net_threshold': 0.5,
+            'net_loss_func': _loss_bc,
 
             # Training setup.
             'trn_epochs': 100,
             'trn_augment_max_trn': 5,
             'trn_augment_max_val': 1,
             'trn_batch_size': 40,
-            'trn_adam_params': {'lr': 0.0015},
+            'trn_optimizer': Adam,
+            'trn_optimizer_args': {'lr': 0.002},
+            # 'trn_optimizer': SGD,
+            # 'trn_optimizer_args': {'lr': 0.1, 'momentum': 0.9},
             'trn_prop_trn': 0.8,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
@@ -150,20 +132,7 @@ class GodardV2(object):
 
     def train(self, weights_path=None, callbacks=[]):
 
-        # Network setup.
-        net, self.cfg['preprocess_imgs_func'], self.cfg['preprocess_tags_func'] = \
-            self.cfg['net_builder_func'](self.cfg['input_shape'])
-        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
-        json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
-
-        # Data setup.
-        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], prop_data=self.cfg['trn_prop_data'],
-                                                prop_trn=self.cfg['trn_prop_trn'])
-        steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
-        steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
-        gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
-        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
-
+        # Metrics.
         def prec(yt, yp):
             yp = K.cast(yp > self.cfg['net_threshold'], 'float')
             tp = K.sum(yt * yp)
@@ -183,23 +152,30 @@ class GodardV2(object):
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
         def yppos(yt, yp):
-            ypr = K.cast(yp > self.cfg['net_threshold'], 'float')
+            ypr = K.round(yp)
             return K.sum(ypr * yp) / K.sum(K.round(ypr))
 
         def ypneg(yt, yp):
-            ypr = K.cast(yp > self.cfg['net_threshold'], 'float')
+            ypr = K.round(yp)
             yprneg = K.abs(ypr - 1)
             return K.sum(yprneg * yp) / K.sum(yprneg)
 
-        def ytmean(yt, yp):
-            return K.mean(yt)
+        # Network setup. ResNet layers frozen at first.
+        net, self.cfg['preprocess_imgs_func'], self.cfg['preprocess_tags_func'] = \
+            self.cfg['net_builder_func'](self.cfg['input_shape'])
+        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
+        json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
 
-        def ypmean(yt, yp):
-            yp = K.cast(yp > self.cfg['net_threshold'], 'float')
-            return K.mean(yp)
+        # Data setup.
+        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], self.cfg['trn_prop_data'],
+                                                self.cfg['trn_prop_trn'])
+        steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
+        steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
+        gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
+        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
 
-        net.compile(optimizer=Adam(**self.cfg['trn_adam_params']), loss=self.cfg['net_loss_func'],
-                    metrics=[F2, prec, reca, yppos, ypneg, ytmean, ypmean])
+        net.compile(optimizer=self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args']), loss=self.cfg['net_loss_func'],
+                    metrics=[F2, prec, reca, yppos, ypneg])
 
         net.summary()
         if weights_path is not None:
@@ -207,13 +183,15 @@ class GodardV2(object):
         pprint(self.cfg)
 
         cb = [
+            FineTuneCB(unfreeze_after=5, unfreeze_lr_mult=0.5),
+            HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
-            # TensorBoardWrapper(gen_val, nb_steps=2, log_dir=self.cfg['cpdir'], histogram_freq=1,
-            #                    batch_size=4, write_graph=False, write_grads=True),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
-            TerminateOnNaN()
+            TerminateOnNaN(),
+            # TensorBoardWrapper(gen_val, nb_steps=10, log_dir=self.cfg['cpdir'], histogram_freq=1,
+            #                    batch_size=4, write_graph=False, write_grads=True),
 
         ] + callbacks
 
@@ -222,22 +200,21 @@ class GodardV2(object):
                                         min_lr=0.00001, epsilon=1e-2, verbose=1, mode='max'))
             cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=20, verbose=1, mode='max'))
 
-        train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'],
-                                  verbose=1, callbacks=cb, validation_data=gen_val, validation_steps=steps_val,
-                                  workers=1)
+        train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'], verbose=1, callbacks=cb,
+                                  validation_data=gen_val, validation_steps=steps_val, workers=1)
 
         return train.history
 
     def batch_gen(self, didxs, nb_steps, nb_augment_max, yield_didxs=False):
 
         data = h5py.File(self.cfg['hdf5_path_trn'], 'r')
-        # imgs = data.get('images')
-        tags = data.get('tags')[...]
+        imgs = data.get('images')
+        tags = data.get('tags')[:, :]
         ib_shape = (self.cfg['trn_batch_size'],) + self.cfg['input_shape']
         tb_shape = (self.cfg['trn_batch_size'], len(TAGS))
         aug_funcs = [
             lambda x: x, lambda x: np.flipud(x), lambda x: np.fliplr(x),
-            lambda x: np.rot90(x, rng.randint(1, 4))
+            lambda x: np.rot90(x, rng.randint(1, 4)),
         ]
 
         while True:
@@ -263,4 +240,4 @@ class GodardV2(object):
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
-    model_runner(GodardV2())
+    model_runner(ResNet50())

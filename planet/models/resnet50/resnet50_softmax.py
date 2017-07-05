@@ -1,228 +1,233 @@
-# ResNet50
-
-import numpy as np
-np.random.seed(317)
-
-from glob import glob
+# Godard v2 adapted from LuckyLoser model.
 from itertools import cycle
-from keras.optimizers import Adam
+from keras.optimizers import SGD, Adam
+from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
 from keras.models import Model
-from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
-from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback
-from keras.losses import kullback_leibler_divergence as KLD
-from keras.losses import binary_crossentropy
-from keras.applications import resnet50
-from os import path, mkdir
-from skimage.transform import resize
-from time import time
-import argparse
-import logging
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
+from keras.layers.advanced_activations import PReLU
+from keras.regularizers import l2
+from pprint import pprint
+from scipy.misc import imresize
+from scipy.ndimage.interpolation import rotate
+from time import sleep, time
+import json
+import h5py
 import keras.backend as K
-import pandas as pd
-import tifffile as tif
+import logging
+import math
+import numpy as np
+import os
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_onehot, onehot_to_taglist, TAGS, onehot_F2, random_transforms
-from planet.utils.keras_utils import HistoryPlot
+from planet.utils.data_utils import TAGS, correct_tags, get_train_val_idxs, serialize_config, IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
+from planet.utils.keras_utils import TensorBoardWrapper, HistoryPlotCB
 from planet.utils.runtime import funcname
+rng = np.random
 
 
-class SamplePlot(Callback):  # copied unmodified from indiconv.py and vggnet.py - 5/16/2017
+class FineTuneCB(Callback):
 
-    def __init__(self, batch_gen, file_name):
-        super(Callback, self).__init__()
-        self.logs = {}
-        self.batch_gen = batch_gen
-        self.file_name = file_name
+    def __init__(self, unfreeze_after=5, unfreeze_lr_mult=0.5):
+        super().__init__()
+        self.unfreeze_after = unfreeze_after
+        self.unfreeze_lr_mult = unfreeze_lr_mult
 
-    def on_train_begin(self, logs={}):
-        self.logs = {}
-
-    def on_epoch_end(self, epoch, logs={}):
-
-        import matplotlib
-        matplotlib.use('agg')
-        import matplotlib.pyplot as plt
-
-        imgs_batch, tags_batch = next(self.batch_gen)
-        tags_pred = self.model.predict(imgs_batch)
-
-        nrows, ncols = min(len(imgs_batch), 10), 2
-        fig, _ = plt.subplots(nrows, ncols, figsize=(8, nrows * 2.5))
-        scatter_x = np.arange(len(TAGS))
-        scatter_xticks = [t[:5] for t in TAGS]
-
-        for idx, (img, tt, tp) in enumerate(zip(imgs_batch, tags_batch, tags_pred)):
-            if idx >= nrows:
-                break
-            ax1, ax2 = fig.axes[idx * 2 + 0], fig.axes[idx * 2 + 1]
-            ax1.axis('off')
-            ax1.imshow(img[:, :, :3])
-            ax2.scatter(scatter_x, np.argmax(tp, axis=1) - np.argmax(tt, axis=1), marker='x')
-            ax2.set_xticks(scatter_x)
-            ax2.set_xticklabels(scatter_xticks, rotation='vertical')
-            ax2.set_ylim(-1.1, 1.1)
-            ax2.set_yticks([-1, 0, 1])
-            ax2.set_yticklabels(['FN', 'OK', 'FP'])
-
-        plt.subplots_adjust(hspace=0.5)
-        plt.suptitle('Epoch %d' % (epoch + 1))
-        plt.savefig(self.file_name)
-        plt.close()
+    def on_epoch_begin(self, epoch, logs):
+        if epoch == self.unfreeze_after:
+            logger = logging.getLogger(funcname())
+            logger.info('Epoch %d: unfreezing layers.' % epoch)
+            for layer in self.model.layers:
+                layer.trainable = True
+            lr = K.get_value(self.model.optimizer.lr) * self.unfreeze_lr_mult
+            K.set_value(self.model.optimizer.lr, lr)
+            logger.info('Epoch %d: new learning rate %.4lf.' % (epoch, K.get_value(self.model.optimizer.lr)))
 
 
-class ResNet50_softmax(object):
+def _loss_bc(yt, yp):
 
-    def __init__(self, checkpoint_name='ResNet50_softmax'):
+    # Standard log loss.
+    loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
+    # return K.mean(loss, axis=-1)
 
-        self.config = {
-            'input_shape': [224, 224, 4],
-            'output_shape': [17, 2],
-            'batch_size': 50,  # Big boy GPU.
-            'nb_epochs': 200,
-            'trn_transform': True,
-            'imgs_dir': 'data/train-tif-v2',
+    # Compute weight matrix, scaled by the error at each tag.
+    fnmax = 20.
+    fnmat = K.clip(yt - yp, 0, 1) * fnmax
+    fpmat = K.abs(yt - 1)
+    wmat = fnmat + fpmat
+    return K.mean(loss * wmat, axis=-1)
+
+
+def _net_resnet50(input_shape=(200, 200, 3)):
+
+    from keras.applications.resnet50 import ResNet50
+
+    def preprocess_jpg(x):
+        for c in range(x.shape[-1]):
+            x[:, :, :, c] -= IMG_MEAN_JPG_TRN[c]
+        return x / 255.
+
+    def preprocess_tags(x):
+        return x
+
+    res = ResNet50(include_top=False, input_shape=input_shape, weights='imagenet')
+    x = Flatten()(res.output)
+    shared_out = Dropout(0.1)(x)
+
+    # Add a classifier for each class instead of a single classifier.
+    # Concatenate classifiers and reshape to match output shape.
+    classifiers = [Dense(2, activation='softmax')(shared_out) for t in TAGS]
+    x = concatenate(classifiers, axis=-1)
+    x = Reshape((17, 2))(x)
+    x = Lambda(lambda x: x[:, :, 1])(x)
+
+    model = Model(inputs=res.input, outputs=x)
+
+    # Initially freeze the resnet layers.
+    for l in model.layers[:len(res.layers)]:
+        l.trainable = False
+
+    return model, preprocess_jpg, preprocess_tags
+
+
+class ResNet50(object):
+
+    def __init__(self):
+
+        self.cfg = {
+
+            # Data setup.
+            'cpdir': 'checkpoints/ResNet50_%d_%d' % (int(time()), os.getpid()),
+            'hdf5_path_trn': 'data/train-jpg.hdf5',
+            'hdf5_path_tst': 'data/test-jpg.hdf5',
+            'input_shape': (224, 224, 3),
+            'preprocess_imgs_func': lambda x: x,
+            'preprocess_tags_func': lambda x: x,
+
+            # Network setup.
+            'net_builder_func': _net_resnet50,
+            'net_loss_func': _loss_bc,
+            'net_threshold': 0.5,
+
+            # Training setup.
+            'trn_epochs': 100,
+            'trn_augment_max_trn': 5,
+            'trn_augment_max_val': 1,
+            'trn_batch_size': 32,
+            'trn_optimizer': Adam,
+            'trn_optimizer_args': {'lr': 0.01},
+            'trn_prop_trn': 0.9,
+            'trn_prop_data': 1.0,
+            'trn_monitor_val': True,
+
+            # Testing.
+            'tst_batch_size': 1000
         }
-
-        self.checkpoint_name = checkpoint_name
-        self.imgs = []
-        self.lbls = []
-        self.net = None
-        self.rng = np.random
 
     @property
     def cpdir(self):
-        cpdir = 'checkpoints/%s_%s/' % (self.checkpoint_name, '_'.join([str(x) for x in self.config['input_shape']]))
-        if not path.exists(cpdir):
-            mkdir(cpdir)
-        return cpdir
+        if not os.path.exists(self.cfg['cpdir']):
+            os.mkdir(self.cfg['cpdir'])
+        return self.cfg['cpdir']
 
-    def create_net(self):
-        if tuple(self.config['input_shape']) != (224, 224, 4):
-            print("ResNet50 has special restrictions on the input shape. Only remove this sys.exit call if you know what you're doing.")
-            sys.exit(1)
+    def train(self, weights_path=None, callbacks=[]):
 
-        inputs = Input(shape=self.config['input_shape'])
-        res = resnet50.ResNet50(include_top=False, weights=None, input_tensor=inputs)
-
-        # Add a classifier for each class instead of a single classifier.
-        res_out = Flatten()(res.output)
-        res_out = Dropout(0.1)(res_out)
-        # res_out = Dense(512, activation='relu')(x)
-
-        classifiers = []
-        for n in range(self.config['output_shape'][0]):
-            classifiers.append(Dense(2, activation='softmax')(res_out))
-
-        # Concatenate classifiers and reshape to match output shape.
-        x = concatenate(classifiers, axis=-1)
-        labels = x = Reshape(self.config['output_shape'], name='labels')(x)
-
-        self.net = Model(inputs=res.input, outputs=labels)
-
-        def F2(yt, yp):
-            yt, yp = K.cast(K.argmax(yt, axis=2), 'float32'), K.cast(K.argmax(yp, axis=2), 'float32')
+        # Metrics.
+        def prec(yt, yp):
+            yp = K.cast(yp > self.cfg['net_threshold'], 'float')
             tp = K.sum(yt * yp)
             fp = K.sum(K.clip(yp - yt, 0, 1))
+            return tp / (tp + fp + K.epsilon())
+
+        def reca(yt, yp):
+            yp = K.cast(yp > self.cfg['net_threshold'], 'float')
+            tp = K.sum(yt * yp)
             fn = K.sum(K.clip(yt - yp, 0, 1))
-            p = tp / (tp + fp)
-            r = tp / (tp + fn)
+            return tp / (tp + fn + K.epsilon())
+
+        def F2(yt, yp):
+            p = prec(yt, yp)
+            r = reca(yt, yp)
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        def dice_coef(yt, yp):
-            '''Dice coefficient from VNet paper.'''
-            yt, yp = yt[:, :, 1], yp[:, :, 1]
-            nmr = 2 * K.sum(yt * yp)
-            dnm = K.sum(yt**2) + K.sum(yp**2) + K.epsilon()
-            return nmr / dnm
+        # Network setup. ResNet layers frozen at first.
+        net, self.cfg['preprocess_imgs_func'], self.cfg['preprocess_tags_func'] = \
+            self.cfg['net_builder_func'](self.cfg['input_shape'])
+        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
+        json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
 
-        def dice_loss(yt, yp):
-            return 1 - dice_coef(yt, yp)
+        # Data setup.
+        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], self.cfg['trn_prop_data'],
+                                                self.cfg['trn_prop_trn'])
+        steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
+        steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
+        gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
+        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
 
-        def kl_loss(yt, yp):
-            return KLD(K.flatten(yt) / K.sum(yt), K.flatten(yp) / K.sum(yp))
+        opt = self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args'])
+        net.compile(optimizer=opt, loss=self.cfg['net_loss_func'], metrics=[F2, prec, reca])
 
-        def custom_loss(yt, yp):
-            return binary_crossentropy(yt, yp)
-
-        self.net.compile(optimizer=Adam(0.001), metrics=[F2, dice_coef, kl_loss], loss=custom_loss)
-        self.net.summary()
-        plot_model(self.net, to_file='%s/net.png' % self.cpdir)
-
-    def train(self):
-
-        batch_gen = self.train_batch_gen('data/train_v2.csv', self.config['imgs_dir'])
+        net.summary()
+        if weights_path is not None:
+            net.load_weights(weights_path)
+        pprint(self.cfg)
 
         cb = [
-            SamplePlot(batch_gen, '%s/samples.png' % self.cpdir),
-            HistoryPlot('%s/history.png' % self.cpdir),
+            FineTuneCB(unfreeze_after=5, unfreeze_lr_mult=0.1),
+            HistoryPlotCB('%s/history.png' % self.cpdir),
+            EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/loss.weights' % self.cpdir, monitor='loss', verbose=1,
-                            save_best_only=True, mode='min', save_weights_only=True),
-            ReduceLROnPlateau(monitor='loss', factor=0.8, patience=2, epsilon=0.005, verbose=1, mode='min'),
-            EarlyStopping(monitor='loss', min_delta=0.01, patience=15, verbose=1, mode='min')
+            ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
+                            save_best_only=True, mode='max'),
+            TerminateOnNaN(),
+
+        ] + callbacks
+
+        if self.cfg['trn_monitor_val']:
+            cb.append(ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=2,
+                                        min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'))
+            cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=20, verbose=1, mode='max'))
+
+        train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'], verbose=1, callbacks=cb,
+                                  validation_data=gen_val, validation_steps=steps_val, workers=1)
+
+        return train.history
+
+    def batch_gen(self, didxs, nb_steps, nb_augment_max, yield_didxs=False):
+
+        data = h5py.File(self.cfg['hdf5_path_trn'], 'r')
+        imgs = data.get('images')
+        tags = data.get('tags')[:, :]
+        ib_shape = (self.cfg['trn_batch_size'],) + self.cfg['input_shape']
+        tb_shape = (self.cfg['trn_batch_size'], len(TAGS))
+        aug_funcs = [
+            lambda x: x, lambda x: np.flipud(x), lambda x: np.fliplr(x),
+            lambda x: np.rot90(x, rng.randint(1, 4)),
+            lambda x: np.roll(x, rng.randint(1, x.shape[0]), axis=rng.choice([0, 1]))
         ]
-
-        self.net.fit_generator(batch_gen, steps_per_epoch=500, verbose=1, callbacks=cb,
-                               epochs=self.config['nb_epochs'], workers=3, pickle_safe=True, max_q_size=100)
-
-        return
-
-    def train_batch_gen(self, csv_path='data/train_v2.csv', imgs_dir='data/train-tif-v2'):
-
-        logger = logging.getLogger(funcname())
-
-        # Helpers.
-        scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
-        onehot_to_distribution = lambda x: np.argmax(x, axis=1) / np.sum(np.argmax(x, axis=1))
-
-        # Read the CSV and error-check contents.
-        df = pd.read_csv(csv_path)
-        img_names = ['%s/%s.tif' % (imgs_dir, n) for n in df['image_name'].values]
-        tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
-
-        # Error check.
-        for img_name, tag_set in zip(img_names, tag_sets):
-            assert path.exists(img_name), img_name
-            assert len(tag_set) > 0, tag_set
 
         while True:
 
-            # New batches at each iteration to prevent over-writing previous batch before it's used.
-            imgs_batch = np.zeros([self.config['batch_size'], ] + self.config['input_shape'], dtype=np.float32)
-            tags_batch = np.zeros([self.config['batch_size'], ] + self.config['output_shape'], dtype=np.uint8)
+            rng.shuffle(didxs)
+            didxs_cycle = cycle(didxs)
 
-            # Sample *self.config['batch_size']* random rows and build the batches.
-            for batch_idx in range(self.config['batch_size']):
-                data_idx = self.rng.randint(0, len(img_names))
+            for _ in range(nb_steps):
 
-                img = resize(tif.imread(img_names[data_idx]), self.config[
-                             'input_shape'][:2], preserve_range=True, mode='constant')
-                if self.config['trn_transform']:
-                    imgs_batch[batch_idx] = scale(random_transforms(img, nb_min=0, nb_max=2))
-                else:
-                    imgs_batch[batch_idx] = scale(img)
-                tags_batch[batch_idx] = tagset_to_onehot(tag_sets[data_idx])
+                ib = np.zeros(ib_shape, dtype=np.float16)
+                tb = np.zeros(tb_shape, dtype=np.int16)
+                db = np.zeros((self.cfg['trn_batch_size'],), dtype=np.uint16)
 
-            yield imgs_batch, tags_batch
+                for bidx in range(self.cfg['trn_batch_size']):
+                    db[bidx] = next(didxs_cycle)
+                    img = imgs.get(str(db[bidx]))[...]
+                    ib[bidx] = imresize(img, self.cfg['input_shape'])
+                    tb[bidx] = tags[db[bidx]]
+                    for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max + 1)):
+                        ib[bidx] = aug(ib[bidx])
 
-    def predict(self, img_batch):
-
-        scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
-
-        for idx in range(len(img_batch)):
-            img_batch[idx] = scale(img_batch[idx])
-
-        tags_pred = self.net.predict(img_batch)
-        tags_pred = tags_pred.round().astype(np.uint8)
-
-        # Convert from onehot to an array of bools
-        tags_pred = tags_pred[:, :, 1]
-        return tags_pred
+                yield self.cfg['preprocess_imgs_func'](ib), self.cfg['preprocess_tags_func'](tb)
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
-    model_runner(ResNet50_softmax)
+    model_runner(ResNet50())

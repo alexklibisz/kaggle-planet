@@ -1,4 +1,8 @@
-7/3/17
+07/03/17
+========
+
+- Software structure
+    - Still very messy. It would probably be smarter to still keep models in their own modules and expose a single random_hyperparms() function that can be invoked from the model runner interface.
 
 - Godard-V2 with sigmoids
     - Godard with sigmoid outputs seems to improve when you decrease depth. Using 3 conv/prelu/conv/prelu/pooling blocks and one 512-dense prelu layer ends up plateauing around F2=0.89, whereas doing 5 conv blocks and two 512-dense layers plateaus around F2=0.86. This might be indicative of the same phenomenon that motivated the Residual architecture.
@@ -20,12 +24,41 @@
     - The depth of this model as it relates to the representational capacity is still concerning. The sigmoid model seemed to get worse as more layers were added.
     - Replacing ReLUs with PReLUs to see if it trains differently. Epoch-over-epoch it increases the F2 a little, somewhere on the order of 0.02 - 0.05. 
     - Increasing Conv filters to 100-150-200 and image size to 100x100. Slight improvement comparing up to epoch 8.
-    - Training on full dataset. Increasing dropout to 0.2 in conv blocks and at fully-connected layer.
+    - 20:45: Training on full dataset. Increasing dropout to 0.2 in conv blocks and at fully-connected layer.
+    - 23:15: Overfitting and plateaued at epoch 30 with F2~=0.9 and val F2~=0.88, hasn't improved in 7 epochs, learning rate already lowered once.
+
 
 - ResNet50
     - Trying ResNet50 again after watching the CS231n lecture where Karpathy explains the motivation for this model. I think it might help alleviate some of the tiny-gradient issues with Godard-Sigmoid.
     - Froze weights is all resnet layers. Trained 4/13 softmax classifiers on average-pooled output using Adam(0.001) on all data. Reaches F2=0.85, prec=0.91, reca=0.85 in 8 epochs.
-    - Adding PReLU non-linearity after the resnet output.
+    - Adding Dense(2048) and PReLU non-linearity after the resnet output.
+    - 22:35: Training on full dataset overfits with F2 = 0.9 and val F2 = 0.86 at 21 epochs. It seems it has the capacity to fit the data, but more augmentation and/or dropout is probably necessary. A higher learning rate might also be OK. Checkpoint dir was checkpoints/ResNet50_1499126266_29277.
+    - 22:45: Re-training with 0.25 dropout on the 2048 features coming from ResNet and 0.25 after the 2048 fully-connected layer. Should probably figure out how to use the keras data augmentation API.
+    - 00:10: This plateaus at 0.85. Adding another 2048 fully-connected layer, up-weighting false negatives, increaisng lr to 0.002, switching to max pooling instead of avg pooling. Still not much improvement beyond ~0.86
+    - 01:20: Removing the fully-connected layers because they don't seem to help. Set it to fine-tune with all of the ResNet layers frozen for five epochs, and then unfreeze the layers and train the full network. Starts with lr 0.002. Then gets cut in half to 0.001 after the ResNet layers get unfrozen. This is a closer replica to what the original paper did.
 
-- Software structure
-    - Still very messy. It would probably be smarter to still keep models in their own modules and expose a single random_hyperparms() function that can be invoked from the model runner interface.
+
+07/04/17
+========
+
+- Godard-V2 with 4/13 softmax
+    - 11:08: Re-trained it with only two 128 conv blocks. F2 gets up to 0.92, val F2 plateaus at 0.88.
+
+- ResNet50
+    - 13:02: Previous fine-tune-then-full-train setup plateaus at F2=0.87. Trying again with SGD instead of Adam. Lr 0.1 and momentum 0.9. Then reduced to 0.01 after five epochs. This plateaus at F2=0.87. 
+    - 14:52: Read on reddit that it's a bad idea to put batchnorm layers in front of the softmax layer. Looking back at ResNet paper, they do not use batchnorm before softmax. Removing all batchnorm layers before softmax. Plateaus at F2=0.82.
+    - 17:00: Tried with single sigmoid output layer and activity regularization leading into the sigmoid layer. This plateaus at F2=0.82.
+    - 17:31: Found a bug in the fine-tuning setup that was constantly lowering the learning rate. No beuno. Trying again with sigmoid layer.
+
+- Misc.
+    - Verified that Keras' he_normal initialization has twice the variance of the glorot_normal initialization, so the implementation is correct.
+
+Next
+
+- Original godard with sigmoid targets at the maximum second derivative of the sigmoid function. Need to adapt log loss function to make this work.
+- Train an ensemble of original godard models.
+
+Tips from Lecun's "Efficient Backprop" paper
+
+- Choose examples that produce a large error more frequently than those that produce a small error.
+- Choose target values at the point of the maximum second derivative on the sigmoid so as to avoid saturating the output units.

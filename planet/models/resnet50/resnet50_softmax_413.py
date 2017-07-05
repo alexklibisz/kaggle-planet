@@ -8,10 +8,12 @@ from keras.layers.advanced_activations import PReLU
 from keras.regularizers import l2
 from pprint import pprint
 from scipy.misc import imresize
+from scipy.ndimage.interpolation import rotate
 from time import sleep, time
 import json
 import h5py
 import keras.backend as K
+import logging
 import math
 import numpy as np
 import os
@@ -19,14 +21,41 @@ import os
 import sys
 sys.path.append('.')
 from planet.utils.data_utils import TAGS, correct_tags, get_train_val_idxs, serialize_config, IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
-from planet.utils.keras_utils import TensorBoardWrapper
+from planet.utils.keras_utils import TensorBoardWrapper, HistoryPlotCB
 from planet.utils.runtime import funcname
 rng = np.random
 
 
+class FineTuneCB(Callback):
+
+    def __init__(self, unfreeze_after=5, unfreeze_lr_mult=0.5):
+        super().__init__()
+        self.unfreeze_after = unfreeze_after
+        self.unfreeze_lr_mult = unfreeze_lr_mult
+
+    def on_epoch_begin(self, epoch, logs):
+        if epoch == self.unfreeze_after:
+            logger = logging.getLogger(funcname())
+            logger.info('Epoch %d: unfreezing layers.' % epoch)
+            for layer in self.model.layers:
+                layer.trainable = True
+            lr = K.get_value(self.model.optimizer.lr) * self.unfreeze_lr_mult
+            K.set_value(self.model.optimizer.lr, lr)
+            logger.info('Epoch %d: new learning rate %.4lf.' % (epoch, K.get_value(self.model.optimizer.lr)))
+
+
 def _loss_bc(yt, yp):
+
+    # Standard log loss.
     loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
-    return K.mean(loss, axis=-1)
+    # return K.mean(loss, axis=-1)
+
+    # Compute weight matrix, scaled by the error at each tag.
+    fnmax = 20.
+    fnmat = K.clip(yt - yp, 0, 1) * fnmax
+    fpmat = K.abs(yt - 1)
+    wmat = fnmat + fpmat
+    return K.mean(loss * wmat, axis=-1)
 
 
 def _net_resnet50(input_shape=(200, 200, 3)):
@@ -48,15 +77,11 @@ def _net_resnet50(input_shape=(200, 200, 3)):
 
     res = ResNet50(include_top=False, weights='imagenet', input_shape=input_shape, pooling='avg')
     x = res.output
-    x = Dense(2048, kernel_initializer='glorot_uniform', name='01.0.dens.2048')(x)
-    x = BatchNormalization(momentum=0.1, name='01.1.bnrm')(x)
-    x = PReLU(name='01.2.prelu')(x)
-    shared = x
+    shared = Dropout(0.1)(x)
 
     # One classifier for the four cloud-cover tags.
-    x = Dense(4, kernel_initializer='glorot_uniform', name='02.clouds.dens')(shared)
-    x = BatchNormalization(momentum=0.1, name='02.clouds.bnrm')(x)
-    out_clouds = Activation('softmax', name='02.clouds.soft')(x)
+    x = Dense(4, kernel_initializer='he_normal', name='07.clouds.dens')(shared)
+    out_clouds = Activation('softmax', name='07.clouds.soft')(x)
 
     # Re-ordered arrangement of tags.
     net_tags = ['clear', 'cloudy', 'haze', 'partly_cloudy', 'agriculture', 'artisinal_mine',
@@ -66,8 +91,7 @@ def _net_resnet50(input_shape=(200, 200, 3)):
     # One softmax classifier for each of the remaining thirteen tags.
     out_others = []
     for tag in net_tags[4:]:
-        x = Dense(2, kernel_initializer='glorot_uniform', name='08.%s.dens' % tag)(shared)
-        x = BatchNormalization(momentum=0.1, name='08.%s.bnrm' % tag)(x)
+        x = Dense(2, kernel_initializer='he_normal', name='08.%s.dens' % tag)(shared)
         x = Activation('softmax', name='08.%s.soft' % tag)(x)
         x = Lambda(lambda x: K.expand_dims(x[:, 1]), name='09.%s' % tag)(x)
         out_others.append(x)
@@ -81,9 +105,9 @@ def _net_resnet50(input_shape=(200, 200, 3)):
 
     # Re-arrange and concatenate them to match the original order.
     arranged = concatenate([combined[net_tags.index(t)] for t in TAGS], name='10.concat')
-
-    # Create model and freeze all ResNet50 layers.
     model = Model(inputs=res.input, outputs=arranged)
+
+    # Initially freeze the resnet layers.
     for l in model.layers[:len(res.layers)]:
         l.trainable = False
 
@@ -114,10 +138,10 @@ class ResNet50(object):
             'trn_augment_max_trn': 5,
             'trn_augment_max_val': 1,
             'trn_batch_size': 40,
-            # 'trn_optimizer': SGD,
-            # 'trn_optimizer_args': {'lr': 0.0001, 'momentum': 0.9},
             'trn_optimizer': Adam,
-            'trn_optimizer_args': {'lr': 0.001},
+            'trn_optimizer_args': {'lr': 0.002},
+            # 'trn_optimizer': SGD,
+            # 'trn_optimizer_args': {'lr': 0.1, 'momentum': 0.9},
             'trn_prop_trn': 0.8,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
@@ -134,20 +158,7 @@ class ResNet50(object):
 
     def train(self, weights_path=None, callbacks=[]):
 
-        # Network setup.
-        net, self.cfg['preprocess_imgs_func'], self.cfg['preprocess_tags_func'] = \
-            self.cfg['net_builder_func'](self.cfg['input_shape'])
-        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
-        json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
-
-        # Data setup.
-        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], self.cfg['trn_prop_data'],
-                                                self.cfg['trn_prop_trn'])
-        steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
-        steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
-        gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
-        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
-
+        # Metrics.
         def prec(yt, yp):
             yp = K.cast(yp > self.cfg['net_threshold'], 'float')
             tp = K.sum(yt * yp)
@@ -175,15 +186,22 @@ class ResNet50(object):
             yprneg = K.abs(ypr - 1)
             return K.sum(yprneg * yp) / K.sum(yprneg)
 
-        def ytmean(yt, yp):
-            return K.mean(yt)
+        # Network setup. ResNet layers frozen at first.
+        net, self.cfg['preprocess_imgs_func'], self.cfg['preprocess_tags_func'] = \
+            self.cfg['net_builder_func'](self.cfg['input_shape'])
+        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
+        json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
 
-        def ypmean(yt, yp):
-            yp = K.cast(yp > self.cfg['net_threshold'], 'float')
-            return K.mean(yp)
+        # Data setup.
+        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], self.cfg['trn_prop_data'],
+                                                self.cfg['trn_prop_trn'])
+        steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
+        steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
+        gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
+        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
 
         net.compile(optimizer=self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args']), loss=self.cfg['net_loss_func'],
-                    metrics=[F2, prec, reca, yppos, ypneg, ytmean, ypmean])
+                    metrics=[F2, prec, reca, yppos, ypneg])
 
         net.summary()
         if weights_path is not None:
@@ -191,6 +209,8 @@ class ResNet50(object):
         pprint(self.cfg)
 
         cb = [
+            FineTuneCB(unfreeze_after=5, unfreeze_lr_mult=0.5),
+            HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
@@ -206,8 +226,8 @@ class ResNet50(object):
                                         min_lr=0.00001, epsilon=1e-2, verbose=1, mode='max'))
             cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=20, verbose=1, mode='max'))
 
-        train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'],
-                                  verbose=1, callbacks=cb, validation_data=gen_val, validation_steps=steps_val)
+        train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'], verbose=1, callbacks=cb,
+                                  validation_data=gen_val, validation_steps=steps_val, workers=1)
 
         return train.history
 
@@ -220,7 +240,7 @@ class ResNet50(object):
         tb_shape = (self.cfg['trn_batch_size'], len(TAGS))
         aug_funcs = [
             lambda x: x, lambda x: np.flipud(x), lambda x: np.fliplr(x),
-            lambda x: np.rot90(x, rng.randint(1, 4))
+            lambda x: np.rot90(x, rng.randint(1, 4)),
         ]
 
         while True:
