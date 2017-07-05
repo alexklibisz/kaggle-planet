@@ -26,39 +26,20 @@ from planet.utils.runtime import funcname
 rng = np.random
 
 
-class FineTuneCB(Callback):
-
-    def __init__(self, unfreeze_after=5, unfreeze_lr_mult=0.5):
-        super().__init__()
-        self.unfreeze_after = unfreeze_after
-        self.unfreeze_lr_mult = unfreeze_lr_mult
-
-    def on_epoch_begin(self, epoch, logs):
-        if epoch == self.unfreeze_after:
-            logger = logging.getLogger(funcname())
-            logger.info('Epoch %d: unfreezing layers.' % epoch)
-            for layer in self.model.layers:
-                layer.trainable = True
-            lr = K.get_value(self.model.optimizer.lr) * self.unfreeze_lr_mult
-            K.set_value(self.model.optimizer.lr, lr)
-            logger.info('Epoch %d: new learning rate %.4lf.' % (epoch, K.get_value(self.model.optimizer.lr)))
-
-
 def _loss_bc(yt, yp):
 
     # Standard log loss.
     loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
-    # return K.mean(loss, axis=-1)
 
     # Compute weight matrix, scaled by the error at each tag.
-    fnmax = 20.
-    fnmat = K.clip(yt - yp, 0, 1) * fnmax
-    fpmat = K.abs(yt - 1)
+    fnwgt, fpwgt = 8., 1.
+    fnmat = yt * fnwgt
+    fpmat = K.abs(yt - 1) * fpwgt
     wmat = fnmat + fpmat
     return K.mean(loss * wmat, axis=-1)
 
 
-def _net_resnet50(input_shape=(200, 200, 3)):
+def _net_resnet50(input_shape=(224, 224, 3)):
 
     from keras.applications.resnet50 import ResNet50
 
@@ -82,10 +63,6 @@ def _net_resnet50(input_shape=(200, 200, 3)):
     x = Lambda(lambda x: x[:, :, 1])(x)
 
     model = Model(inputs=res.input, outputs=x)
-
-    # Initially freeze the resnet layers.
-    for l in model.layers[:len(res.layers)]:
-        l.trainable = False
 
     return model, preprocess_jpg, preprocess_tags
 
@@ -115,7 +92,7 @@ class ResNet50(object):
             'trn_augment_max_val': 1,
             'trn_batch_size': 32,
             'trn_optimizer': Adam,
-            'trn_optimizer_args': {'lr': 0.01},
+            'trn_optimizer_args': {'lr': 0.001},
             'trn_prop_trn': 0.9,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
@@ -174,7 +151,7 @@ class ResNet50(object):
         pprint(self.cfg)
 
         cb = [
-            FineTuneCB(unfreeze_after=5, unfreeze_lr_mult=0.1),
+            # FineTuneCB(unfreeze_after=2, unfreeze_lr_mult=0.1),
             HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
@@ -185,7 +162,7 @@ class ResNet50(object):
         ] + callbacks
 
         if self.cfg['trn_monitor_val']:
-            cb.append(ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=2,
+            cb.append(ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=5,
                                         min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'))
             cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=20, verbose=1, mode='max'))
 

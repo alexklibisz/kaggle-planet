@@ -11,8 +11,11 @@ from scipy.misc import imread
 from sklearn.metrics import precision_score, recall_score
 from planet.utils.data_utils import bool_F2, tagstr_to_binary, binary_to_tagstr, correct_tags
 
-np.random.seed(1499006546)
-tf.set_random_seed(1499006546)
+# np.random.seed(1499006546)
+# tf.set_random_seed(1499006546)
+
+np.random.seed(317)
+tf.set_random_seed(318)
 
 
 def model_runner(model):

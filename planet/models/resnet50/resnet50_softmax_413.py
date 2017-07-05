@@ -26,39 +26,20 @@ from planet.utils.runtime import funcname
 rng = np.random
 
 
-class FineTuneCB(Callback):
-
-    def __init__(self, unfreeze_after=5, unfreeze_lr_mult=0.5):
-        super().__init__()
-        self.unfreeze_after = unfreeze_after
-        self.unfreeze_lr_mult = unfreeze_lr_mult
-
-    def on_epoch_begin(self, epoch, logs):
-        if epoch == self.unfreeze_after:
-            logger = logging.getLogger(funcname())
-            logger.info('Epoch %d: unfreezing layers.' % epoch)
-            for layer in self.model.layers:
-                layer.trainable = True
-            lr = K.get_value(self.model.optimizer.lr) * self.unfreeze_lr_mult
-            K.set_value(self.model.optimizer.lr, lr)
-            logger.info('Epoch %d: new learning rate %.4lf.' % (epoch, K.get_value(self.model.optimizer.lr)))
-
-
 def _loss_bc(yt, yp):
 
     # Standard log loss.
     loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
-    # return K.mean(loss, axis=-1)
 
     # Compute weight matrix, scaled by the error at each tag.
-    fnmax = 20.
-    fnmat = K.clip(yt - yp, 0, 1) * fnmax
-    fpmat = K.abs(yt - 1)
+    fnwgt, fpwgt = 8., 1.
+    fnmat = yt * fnwgt
+    fpmat = K.abs(yt - 1) * fpwgt
     wmat = fnmat + fpmat
     return K.mean(loss * wmat, axis=-1)
 
 
-def _net_resnet50(input_shape=(200, 200, 3)):
+def _net_resnet50(input_shape=(224, 224, 3)):
 
     from keras.applications.resnet50 import ResNet50
 
@@ -67,20 +48,15 @@ def _net_resnet50(input_shape=(200, 200, 3)):
             x[:, :, :, c] -= IMG_MEAN_JPG_TRN[c]
         return x / 255.
 
-    def preprocess_tif(x):
-        for c in range(x.shape[-1]):
-            x[:, :, :, c] -= IMG_MEAN_TIF_TRN[c]
-        return x / 65535.
-
     def preprocess_tags(x):
         return x
 
-    res = ResNet50(include_top=False, weights='imagenet', input_shape=input_shape, pooling='avg')
-    x = res.output
-    shared = Dropout(0.1)(x)
+    res = ResNet50(include_top=False, input_shape=input_shape, weights='imagenet')
+    x = Flatten()(res.output)
+    shared_out = Dropout(0.1)(x)
 
     # One classifier for the four cloud-cover tags.
-    x = Dense(4, kernel_initializer='he_normal', name='07.clouds.dens')(shared)
+    x = Dense(4, name='07.clouds.dens')(shared_out)
     out_clouds = Activation('softmax', name='07.clouds.soft')(x)
 
     # Re-ordered arrangement of tags.
@@ -91,7 +67,7 @@ def _net_resnet50(input_shape=(200, 200, 3)):
     # One softmax classifier for each of the remaining thirteen tags.
     out_others = []
     for tag in net_tags[4:]:
-        x = Dense(2, kernel_initializer='he_normal', name='08.%s.dens' % tag)(shared)
+        x = Dense(2, name='08.%s.dens' % tag)(shared_out)
         x = Activation('softmax', name='08.%s.soft' % tag)(x)
         x = Lambda(lambda x: K.expand_dims(x[:, 1]), name='09.%s' % tag)(x)
         out_others.append(x)
@@ -107,11 +83,7 @@ def _net_resnet50(input_shape=(200, 200, 3)):
     arranged = concatenate([combined[net_tags.index(t)] for t in TAGS], name='10.concat')
     model = Model(inputs=res.input, outputs=arranged)
 
-    # Initially freeze the resnet layers.
-    for l in model.layers[:len(res.layers)]:
-        l.trainable = False
-
-    return model, preprocess_jpg if input_shape[-1] == 3 else preprocess_tif, preprocess_tags
+    return model, preprocess_jpg, preprocess_tags
 
 
 class ResNet50(object):
@@ -124,25 +96,23 @@ class ResNet50(object):
             'cpdir': 'checkpoints/ResNet50_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
-            'input_shape': (197, 197, 3),
+            'input_shape': (224, 224, 3),
             'preprocess_imgs_func': lambda x: x,
             'preprocess_tags_func': lambda x: x,
 
             # Network setup.
             'net_builder_func': _net_resnet50,
-            'net_threshold': 0.5,
             'net_loss_func': _loss_bc,
+            'net_threshold': 0.5,
 
             # Training setup.
             'trn_epochs': 100,
             'trn_augment_max_trn': 5,
             'trn_augment_max_val': 1,
-            'trn_batch_size': 40,
+            'trn_batch_size': 32,
             'trn_optimizer': Adam,
-            'trn_optimizer_args': {'lr': 0.002},
-            # 'trn_optimizer': SGD,
-            # 'trn_optimizer_args': {'lr': 0.1, 'momentum': 0.9},
-            'trn_prop_trn': 0.8,
+            'trn_optimizer_args': {'lr': 0.001},
+            'trn_prop_trn': 0.9,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
 
@@ -177,15 +147,6 @@ class ResNet50(object):
             b = 2.0
             return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
 
-        def yppos(yt, yp):
-            ypr = K.round(yp)
-            return K.sum(ypr * yp) / K.sum(K.round(ypr))
-
-        def ypneg(yt, yp):
-            ypr = K.round(yp)
-            yprneg = K.abs(ypr - 1)
-            return K.sum(yprneg * yp) / K.sum(yprneg)
-
         # Network setup. ResNet layers frozen at first.
         net, self.cfg['preprocess_imgs_func'], self.cfg['preprocess_tags_func'] = \
             self.cfg['net_builder_func'](self.cfg['input_shape'])
@@ -200,8 +161,8 @@ class ResNet50(object):
         gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
         gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
 
-        net.compile(optimizer=self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args']), loss=self.cfg['net_loss_func'],
-                    metrics=[F2, prec, reca, yppos, ypneg])
+        opt = self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args'])
+        net.compile(optimizer=opt, loss=self.cfg['net_loss_func'], metrics=[F2, prec, reca])
 
         net.summary()
         if weights_path is not None:
@@ -209,21 +170,19 @@ class ResNet50(object):
         pprint(self.cfg)
 
         cb = [
-            FineTuneCB(unfreeze_after=5, unfreeze_lr_mult=0.5),
+            # FineTuneCB(unfreeze_after=2, unfreeze_lr_mult=0.1),
             HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
             TerminateOnNaN(),
-            # TensorBoardWrapper(gen_val, nb_steps=10, log_dir=self.cfg['cpdir'], histogram_freq=1,
-            #                    batch_size=4, write_graph=False, write_grads=True),
 
         ] + callbacks
 
         if self.cfg['trn_monitor_val']:
-            cb.append(ReduceLROnPlateau(monitor='val_F2', factor=0.1, patience=10,
-                                        min_lr=0.00001, epsilon=1e-2, verbose=1, mode='max'))
+            cb.append(ReduceLROnPlateau(monitor='val_F2', factor=0.5, patience=2,
+                                        min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max'))
             cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=20, verbose=1, mode='max'))
 
         train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg['trn_epochs'], verbose=1, callbacks=cb,
@@ -241,6 +200,7 @@ class ResNet50(object):
         aug_funcs = [
             lambda x: x, lambda x: np.flipud(x), lambda x: np.fliplr(x),
             lambda x: np.rot90(x, rng.randint(1, 4)),
+            lambda x: np.roll(x, rng.randint(1, x.shape[0]), axis=rng.choice([0, 1]))
         ]
 
         while True:

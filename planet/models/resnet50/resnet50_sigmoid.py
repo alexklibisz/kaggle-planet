@@ -44,7 +44,6 @@ def _loss_bc(yt, yp):
 
     # Standard log loss.
     loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
-    # return K.mean(loss, axis=-1)
 
     # Compute weight matrix, scaled by the error at each tag.
     fnmax = 20.
@@ -114,8 +113,6 @@ class ResNet50(object):
             'trn_batch_size': 40,
             'trn_optimizer': Adam,
             'trn_optimizer_args': {'lr': 0.002},
-            # 'trn_optimizer': SGD,
-            # 'trn_optimizer_args': {'lr': 0.1, 'momentum': 0.9},
             'trn_prop_trn': 0.8,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
