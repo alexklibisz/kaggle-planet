@@ -5,3 +5,4 @@ data
 *.log
 !*/.keep
 notebooks/.ipynb_checkpoints
+notebooks/*.hdf5
