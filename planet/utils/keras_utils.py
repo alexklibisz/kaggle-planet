@@ -12,18 +12,53 @@ import os
 import pickle as pkl
 
 from planet.utils.data_utils import TAGS
+from planet.utils.runtime import funcname
 
 
-def pretty_names(model):
-    '''Renames the layers so they are easier to distinguish in Tensorboard.'''
-    for i, l in enumerate(model.layers):
-        type_ = l.get_config()['activation'] if type(l).__name__ == 'Activation' else type(l).__name__
-        shape = 'x'.join([str(d) for d in l.output_shape[1:]])
-        model.layers[i].name = '%02d.%s.%s' % (i, type_, shape)
-    import pdb
-    pdb.set_trace()
+def prec(yt, yp):
+    yp = K.round(yp)
+    tp = K.sum(yt * yp)
+    fp = K.sum(K.clip(yp - yt, 0, 1))
+    return tp / (tp + fp + K.epsilon())
 
-    return model
+
+def reca(yt, yp):
+    yp = K.round(yp)
+    tp = K.sum(yt * yp)
+    fn = K.sum(K.clip(yt - yp, 0, 1))
+    return tp / (tp + fn + K.epsilon())
+
+
+def F2(yt, yp):
+    p = prec(yt, yp)
+    r = reca(yt, yp)
+    b = 2.0
+    return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
+
+
+def tag_metrics():
+
+    # Decorator for procedurally generating functions with different names.
+    def rename(newname):
+        def decorator(f):
+            f.__name__ = newname
+            return f
+        return decorator
+
+    # Generate an F2 metric for each tag.
+    metrics = []
+    for i, t in enumerate(TAGS):
+        @rename('%s_p' % t[:4].upper())
+        def tagp(yt, yp, i=i):
+            return prec(yt[:, i], yp[:, i])
+        metrics.append(tagp)
+
+        @rename('%s_r' % t[:4].upper())
+        def tagr(yt, yp, i=i):
+            return reca(yt[:, i], yp[:, i])
+        metrics.append(tagr)
+
+    return metrics
 
 
 class ThresholdedSigmoid(Layer):
@@ -124,7 +159,7 @@ class TensorBoardWrapper(TensorBoard):
 class ValidationCB(Callback):
     '''Compute validation metrics and save data to disk for visualizing/exploring.'''
 
-    def __init__(self, cpdir, batch_gen, batch_size, nb_steps, threshold):
+    def __init__(self, cpdir, batch_gen, batch_size, nb_steps, threshold=0.5):
         super(Callback, self).__init__()
         self.cpdir = cpdir
         self.batch_size = batch_size
@@ -145,12 +180,10 @@ class ValidationCB(Callback):
         # Make predictions and store all true and predicted tags. Round predictions.
         yt = np.zeros((self.batch_size * self.nb_steps, len(TAGS)))
         yp = np.zeros((self.batch_size * self.nb_steps, len(TAGS)))
-        didxs = np.zeros((self.nb_steps, self.batch_size))
         for bidx in tqdm(range(self.nb_steps)):
-            ib, tb, db = next(self.batch_gen)
+            ib, tb = next(self.batch_gen)
             yt[bidx * self.batch_size:(bidx + 1) * self.batch_size] = tb
             yp[bidx * self.batch_size:(bidx + 1) * self.batch_size] = self.model.predict(ib) > self.threshold
-            didxs[bidx] = db
 
         # Metrics per tag.
         for tidx, tag in enumerate(TAGS):
@@ -173,12 +206,18 @@ class ValidationCB(Callback):
         logs['val_prec'] = prec
         logs['val_reca'] = reca
 
-        # Save to disk.
-        payload = {'metrics': self.metrics, 'tag_metrics': self.tag_metrics, 'yt': yt, 'yp': yp, 'didxs': didxs}
-        p = '%s/val_data_%d.pkl' % (self.cpdir, epoch)
-        with open(p, 'wb') as fp:
-            pkl.dump(payload, fp)
-        copyfile(p, '%s/val_data_latest.pkl' % self.cpdir)
+        # Print per-tag metrics.
+        logger = logging.getLogger(funcname())
+        for tag in TAGS:
+            tm = self.tag_metrics[tag]
+            logger.info('%-20s F2=%.5lf Prec=%.5lf Reca=%.5lf' % (tag, tm['f2'][-1], tm['prec'][-1], tm['reca'][-1]))
+
+        # # Save to disk.
+        # payload = {'metrics': self.metrics, 'tag_metrics': self.tag_metrics, 'yt': yt, 'yp': yp}
+        # p = '%s/val_data_%d.pkl' % (self.cpdir, epoch)
+        # with open(p, 'wb') as fp:
+        #     pkl.dump(payload, fp)
+        # copyfile(p, '%s/val_data_latest.pkl' % self.cpdir)
 
 
 class HistoryPlotCB(Callback):

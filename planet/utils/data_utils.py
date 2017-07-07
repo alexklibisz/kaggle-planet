@@ -38,6 +38,7 @@ TAGS_idxs = {t: i for i, t in enumerate(TAGS)}
 
 # Mean values per channel computed on train dataset.
 IMG_MEAN_JPG_TRN = (79.4163863379, 86.8384090525, 76.201647143)
+IMG_STDV_JPG_TRN = ()
 IMG_MEAN_TIF_TRN = (4988.75696302, 4270.74552695, 3074.87909779, 6398.84897763)
 
 

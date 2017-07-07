@@ -1,214 +1,219 @@
-# DenseNet
-
-import numpy as np
-np.random.seed(317)
-
-from glob import glob
 from itertools import cycle
-from keras.optimizers import Adam
+from keras.optimizers import SGD, Adam
+from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
 from keras.models import Model
-from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization
-from keras.utils import plot_model
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, Callback, LearningRateScheduler
-from keras.losses import kullback_leibler_divergence as KLD
-from keras.losses import binary_crossentropy
-from keras.applications import resnet50
-from math import ceil
-from os import path, mkdir, listdir
-from PIL import Image
-from skimage.transform import resize
-from time import time
-import argparse
-import logging
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
+from keras.layers.advanced_activations import PReLU
+from keras.regularizers import l2
+from pprint import pprint
+from scipy.misc import imresize
+from scipy.ndimage.interpolation import rotate
+from time import sleep, time
+import json
+import h5py
 import keras.backend as K
-import pandas as pd
-import tifffile as tif
-
+import logging
+import math
+import numpy as np
+import os
 
 import sys
 sys.path.append('.')
-from planet.utils.data_utils import tagset_to_ints, onehot_to_taglist, TAGS, onehot_F2, random_transforms
-from planet.utils.keras_utils import HistoryPlot
+from planet.utils.data_utils import TAGS, correct_tags, get_train_val_idxs, serialize_config, IMG_MEAN_JPG_TRN, IMG_MEAN_TIF_TRN
+from planet.utils.keras_utils import ValidationCB, HistoryPlotCB, tag_metrics, F2, prec, reca
 from planet.utils.runtime import funcname
-
-from PIL import Image
-
-from planet.models.densenet import densenet_builder
-
-class SamplePlot(Callback):
-
-    def __init__(self, batch_gen, file_name):
-        super(Callback, self).__init__()
-        self.logs = {}
-        self.batch_gen = batch_gen
-        self.file_name = file_name
-
-    def on_train_begin(self, logs={}):
-        self.logs = {}
-
-    def on_epoch_end(self, epoch, logs={}):
-
-        import matplotlib
-        matplotlib.use('agg')
-        import matplotlib.pyplot as plt
-
-        imgs_batch, tags_batch = next(self.batch_gen)
-        tags_pred = self.model.predict(imgs_batch)
-
-        nrows, ncols = min(len(imgs_batch), 10), 2
-        fig, _ = plt.subplots(nrows, ncols, figsize=(8, nrows * 2.5))
-        scatter_x = np.arange(len(TAGS))
-        scatter_xticks = [t[:5] for t in TAGS]
-
-        for idx, (img, tt, tp) in enumerate(zip(imgs_batch, tags_batch, tags_pred)):
-            if idx >= nrows:
-                break
-            ax1, ax2 = fig.axes[idx * 2 + 0], fig.axes[idx * 2 + 1]
-            ax1.axis('off')
-            ax1.imshow(img[:, :, :3])
-            tt, tp = tt.round().astype(np.float32), tp.round().astype(np.float32)
-            ax2.scatter(scatter_x, tp - tt, marker='x')
-            ax2.set_xticks(scatter_x)
-            ax2.set_xticklabels(scatter_xticks, rotation='vertical')
-            ax2.set_ylim(-1.1, 1.1)
-            ax2.set_yticks([-1, 0, 1])
-            ax2.set_yticklabels(['FN', 'OK', 'FP'])
-
-        plt.subplots_adjust(hspace=0.5)
-        plt.suptitle('Epoch %d' % (epoch + 1))
-        plt.savefig(self.file_name)
-        plt.close()
+rng = np.random
 
 
-class DenseNet(object):
+def _loss_wbc(yt, yp):
 
-    def __init__(self, checkpoint_name='DenseNet'):
+    # Standard log loss.
+    loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
 
-        self.config = {
-            'input_shape': [64, 64, 3],
-            'output_shape': [17],
-            'batch_size': 32,
-            'trn_nb_epochs': 90,
-            'validation_split_size': 0.2,
-            'trn_transform': True,
-            'trn_imgs_csv': 'data/train_v2.csv',
-            'trn_imgs_dir': 'data/train-jpg',
-            'tst_imgs_csv': 'data/sample_submission_v2.csv',
-            'tst_imgs_dir': 'data/test-jpg',
-            'trn_prop_trn': 0.8,
-            'trn_prop_val': 0.2
+    # Compute weight matrix, scaled by the error at each tag.
+    # Assumes a positive/negative threshold at 0.5.
+    yp = K.round(yp)
+    fnwgt, fpwgt = 3., 1.
+    fnmat = K.clip(yt - yp, 0, 1) * (fnwgt - 1)
+    fpmat = K.clip(yp - yt, 0, 1) * (fpwgt - 1)
+    wmat = fnmat + fpmat + 1
+    return K.mean(loss * wmat, axis=-1)
+
+
+def _net_densenet121_sigmoid(input_shape=(224, 224, 3)):
+
+    from planet.models.densenet.DN121 import densenet121_model
+    from planet.utils.multi_gpu import make_parallel
+
+    def preprocess_jpg(x):
+        return x * 1. / 255.
+
+    def preprocess_tags(x):
+        return x
+
+    dns = densenet121_model(img_rows=input_shape[0], img_cols=input_shape[1],
+                            color_type=input_shape[2], dropout_rate=0.2)
+    shared_out = dns.output
+    x = Dense(len(TAGS))(shared_out)
+    x = Activation('sigmoid')(x)
+    model = Model(inputs=dns.input, outputs=x)
+
+    return model, preprocess_jpg, preprocess_tags
+
+
+def _net_densenet121_softmax(input_shape=(224, 224, 3)):
+
+    from planet.models.densenet.DN121 import densenet121_model
+    from planet.utils.multi_gpu import make_parallel
+
+    def preprocess_jpg(x):
+        return x * 1. / 255.
+
+    def preprocess_tags(x):
+        return x
+
+    dns = densenet121_model(img_rows=input_shape[0], img_cols=input_shape[1], color_type=input_shape[2])
+    shared_out = dns.output
+    classifiers = [Dense(2, activation='softmax')(shared_out) for t in TAGS]
+    x = concatenate(classifiers, axis=-1)
+    x = Reshape((len(TAGS), 2))(x)
+    x = Lambda(lambda x: x[:, :, 0])(x)
+    model = Model(inputs=dns.input, outputs=x)
+
+    return model, preprocess_jpg, preprocess_tags
+
+
+class DenseNet121(object):
+
+    def __init__(self):
+
+        self.cfg = {
+
+            # Data setup.
+            'cpdir': 'checkpoints/DenseNet121_%d_%d' % (int(time()), os.getpid()),
+            'hdf5_path_trn': 'data/train-jpg.hdf5',
+            'hdf5_path_tst': 'data/test-jpg.hdf5',
+            'input_shape': (140, 140, 3),
+            'pp_imgs_func': lambda x: x,
+            'pp_tags_func': lambda x: x,
+            'imgs_resize_crop': 'resize',
+
+            # Network setup.
+            # 'net_builder_func': _net_densenet121_softmax,
+            'net_builder_func': _net_densenet121_sigmoid,
+            'net_loss_func': _loss_wbc,
+
+            # Training setup.
+            'trn_epochs': 100,
+            'trn_augment_max_trn': 5,
+            'trn_augment_max_val': 0,
+            'trn_batch_size': 44,
+            # 'trn_optimizer': Adam,
+            # 'trn_optimizer_args': {'lr': 0.1},
+            'trn_optimizer': SGD,
+            'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': True},
+            'trn_prop_trn': 0.9,
+            'trn_prop_data': 1.0,
+            'trn_monitor_val': True,
+
+            # Testing.
+            'tst_batch_size': 1000
         }
-
-        self.checkpoint_name = checkpoint_name
-        self.net = None
-        self.rng = np.random
 
     @property
     def cpdir(self):
-        cpdir = 'checkpoints/%s_%s/' % (self.checkpoint_name, '_'.join([str(x) for x in self.config['input_shape']]))
-        if not path.exists(cpdir):
-            mkdir(cpdir)
-        return cpdir
+        if not os.path.exists(self.cfg['cpdir']):
+            os.mkdir(self.cfg['cpdir'])
+        return self.cfg['cpdir']
 
-    def create_net(self):
+    def train(self, weights_path=None, callbacks=[]):
 
-        self.net = densenet_builder.DenseNet(self.config['output_shape'][0], 
-                                            self.config['input_shape'], 
-                                            depth=16, 
-                                            nb_dense_block=4, 
-                                            growth_rate=12,
-                                            nb_filter=5, 
-                                            dropout_rate=0.2, 
-                                            weight_decay=1E-4)
+        # Network setup.
+        net, self.cfg['pp_imgs_func'], self.cfg['pp_tags_func'] = \
+            self.cfg['net_builder_func'](self.cfg['input_shape'])
+        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
+        json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
 
-        # TODO: play with this threshold
-        def F2(yt, yp, threshold=0.5):
-            yp = K.cast(yp > threshold, 'float')
-            tp = K.sum(yt * yp)
-            fp = K.sum(K.clip(yp - yt, 0, 1))
-            fn = K.sum(K.clip(yt - yp, 0, 1))
-            p = tp / (tp + fp)
-            r = tp / (tp + fn)
-            b = 2.0
-            return (1 + b**2) * ((p * r) / (b**2 * p + r + K.epsilon()))
+        # Data setup.
+        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], self.cfg['trn_prop_data'],
+                                                self.cfg['trn_prop_trn'])
+        steps_trn = max(math.ceil(len(idxs_trn) / self.cfg['trn_batch_size']), 400)
+        steps_val = max(math.ceil(len(idxs_val) / self.cfg['trn_batch_size']), 20)
+        gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
+        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
 
-        self.net.compile(optimizer=Adam(0.001), metrics=[F2, 'accuracy'], loss='binary_crossentropy')
-        self.net.summary()
-        plot_model(self.net, to_file='%s/net.png' % self.cpdir)
+        opt = self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args'])
+        net.compile(optimizer=opt, loss=self.cfg['net_loss_func'], metrics=[F2, prec, reca] + tag_metrics())
 
-    def train(self, rng=np.random):
-
-        imgs_idxs = np.arange(len(listdir(self.config['trn_imgs_dir'])))
-        imgs_idxs = rng.choice(imgs_idxs, len(imgs_idxs))
-        imgs_idxs_trn = imgs_idxs[:int(len(imgs_idxs) * self.config['trn_prop_trn'])]
-        imgs_idxs_val = imgs_idxs[-int(len(imgs_idxs) * self.config['trn_prop_val']):]
-        gen_trn = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_trn)
-        gen_val = self.batch_gen(self.config['trn_imgs_csv'], self.config['trn_imgs_dir'], imgs_idxs_val)
-
-        def lrsched(epoch):
-            if epoch < 0.5*self.config['trn_nb_epochs']:
-                return 1e-1
-            elif epoch < 0.75*self.config['trn_nb_epochs']:
-                return 1e-2
-            else:
-                return 1e-3
+        net.summary()
+        if weights_path is not None:
+            net.load_weights(weights_path)
+        pprint(self.cfg)
 
         cb = [
-            HistoryPlot('%s/history.png' % self.cpdir),
-            SamplePlot(gen_trn, '%s/samples.png' % self.cpdir),
+            ValidationCB(self.cfg['cpdir'], gen_val, self.cfg['trn_batch_size'], steps_val),
+            HistoryPlotCB('%s/history.png' % self.cpdir),
+            EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/weights_val_acc.hdf5' % self.cpdir, monitor='val_acc', verbose=1,
-                            save_best_only=True, mode='max', save_weights_only=True),
-            ModelCheckpoint('%s/weights_val_loss.hdf5' % self.cpdir, monitor='val_loss', verbose=1,
-                            save_best_only=True, mode='min', save_weights_only=True),
-            EarlyStopping(monitor='val_loss', patience=3, verbose=0, mode='min'),
-            LearningRateScheduler(lrsched)
+            ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
+                            save_best_only=True, mode='max'),
+            ReduceLROnPlateau(monitor='F2', factor=0.1, patience=5,
+                              min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max')
+
+        ] + callbacks
+
+        if self.cfg['trn_monitor_val']:
+            cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=20, verbose=1, mode='max'))
+
+        train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg[
+                                  'trn_epochs'], verbose=1, callbacks=cb)
+
+        return train.history
+
+    def batch_gen(self, didxs, nb_steps, nb_augment_max, yield_didxs=False):
+
+        data = h5py.File(self.cfg['hdf5_path_trn'], 'r')
+        imgs = data.get('images')
+        tags = data.get('tags')[:, :]
+        ib_shape = (self.cfg['trn_batch_size'],) + self.cfg['input_shape']
+        tb_shape = (self.cfg['trn_batch_size'], len(TAGS))
+        aug_funcs = [
+            lambda x: x, lambda x: np.flipud(x), lambda x: np.fliplr(x),
+            lambda x: np.rot90(x, rng.randint(1, 4)),
+            lambda x: np.roll(x, rng.randint(1, x.shape[0]), axis=rng.choice([0, 1]))
         ]
 
-        # Steps should run through the full training / validation set per epoch.
-        nb_steps_trn = ceil(len(imgs_idxs_trn) * 1. / self.config['batch_size'])
-        nb_steps_val = ceil(len(imgs_idxs_val) * 1. / self.config['batch_size'])
-
-        self.net.fit_generator(gen_trn, steps_per_epoch=nb_steps_trn, epochs=self.config['trn_nb_epochs'],
-                               verbose=1, callbacks=cb, workers=3, pickle_safe=True, max_q_size=100,
-                               validation_data=gen_val, validation_steps=nb_steps_val)
-
-    def batch_gen(self, imgs_csv, imgs_dir, imgs_idxs, rng=np.random):
-
-        # Read the CSV and extract image names and tags.
-        df = pd.read_csv(imgs_csv)
-        imgs_paths = ['%s/%s.jpg' % (imgs_dir, n) for n in df['image_name'].values]
-        tag_sets = [set(t.strip().split(' ')) for t in df['tags'].values]
+        def crop(img):
+            h, w, _ = self.cfg['input_shape']
+            y0 = rng.randint(0, img.shape[0] - h)
+            x0 = rng.randint(0, img.shape[1] - w)
+            y1 = y0 + h
+            x1 = x0 + w
+            return img[y0:y1, x0:x1, :]
 
         while True:
 
-            imgs_batch = np.zeros([self.config['batch_size'], ] + self.config['input_shape'])
-            tags_batch = np.zeros([self.config['batch_size'], ] + self.config['output_shape'])
-            _imgs_idxs = cycle(rng.choice(imgs_idxs, len(imgs_idxs)))
+            rng.shuffle(didxs)
+            didxs_cycle = cycle(didxs)
 
-            for batch_idx in range(self.config['batch_size']):
-                img_idx = next(_imgs_idxs)
-                img = Image.open(imgs_paths[img_idx]).convert('RGB')
-                img.thumbnail(self.config['input_shape'][:2])
-                imgs_batch[batch_idx] = np.asarray(img, dtype=np.float32) / 255.
-                tags_batch[batch_idx] = tagset_to_ints(tag_sets[img_idx])
+            for _ in range(nb_steps):
 
-            yield imgs_batch, tags_batch
+                ib = np.zeros(ib_shape, dtype=np.float16)
+                tb = np.zeros(tb_shape, dtype=np.int16)
 
-    def predict(self, img_batch):
-        # TODO: fix this function to use thresholds?
-        scale = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x)) * 2 - 1
+                for bidx in range(self.cfg['trn_batch_size']):
+                    didx = next(didxs_cycle)
+                    img = imgs.get(str(didx))[...]
+                    if self.cfg['imgs_resize_crop'] == 'resize':
+                        ib[bidx] = imresize(img, self.cfg['input_shape'])
+                    else:
+                        ib[bidx] = crop(imgs.get(str(didx))[...])
+                    tb[bidx] = tags[didx]
+                    for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max + 1)):
+                        ib[bidx] = aug(ib[bidx])
 
-        for idx in range(len(img_batch)):
-            img_batch[idx] = scale(img_batch[idx])
-
-        tags_pred = self.net.predict(img_batch)
-        tags_pred = tags_pred.round().astype(np.uint8)
-
-        # Convert from onehot to an array of bools
-        tags_pred = tags_pred[:, :, 1]
-        return tags_pred
+                yield self.cfg['pp_imgs_func'](ib), self.cfg['pp_tags_func'](tb)
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner
-    model_runner(DenseNet())
+    model_runner(DenseNet121())
