@@ -1,4 +1,3 @@
-# Godard v2 adapted from LuckyLoser model.
 from itertools import cycle
 from keras.optimizers import SGD, Adam
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
@@ -51,7 +50,7 @@ def _net_resnet50(input_shape=(224, 224, 3)):
     def preprocess_tags(x):
         return x
 
-    res = ResNet50(include_top=False, input_shape=input_shape, weights='imagenet')
+    res = ResNet50(include_top=False, input_shape=input_shape, weights=None)
     x = Flatten()(res.output)
     shared_out = Dropout(0.1)(x)
 

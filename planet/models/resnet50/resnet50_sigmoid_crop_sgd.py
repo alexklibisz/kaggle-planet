@@ -1,4 +1,3 @@
-# Godard v2 adapted from LuckyLoser model.
 from itertools import cycle
 from keras.optimizers import SGD, Adam
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
@@ -26,16 +25,24 @@ from planet.utils.runtime import funcname
 rng = np.random
 
 
+class PrintLRCB(Callback):
+
+    def on_epoch_end(self, epoch, logs):
+        print('%d: %.5lf' % (epoch, K.get_value(self.model.optimizer.lr)))
+
+
 def _loss_bc(yt, yp):
 
     # Standard log loss.
     loss = -1 * (yt * K.log(yp + 1e-7) + (1 - yt) * K.log(1 - yp + 1e-7))
 
     # Compute weight matrix, scaled by the error at each tag.
+    # Assumes a positive/negative threshold at 0.5.
+    yp = K.round(yp)
     fnwgt, fpwgt = 8., 1.
-    fnmat = yt * fnwgt
-    fpmat = K.abs(yt - 1) * fpwgt
-    wmat = fnmat + fpmat
+    fnmat = K.clip(yt - yp, 0, 1) * (fnwgt - 1)
+    fpmat = K.clip(yp - yt, 0, 1) * (fpwgt - 1)
+    wmat = K.ones_like(yt) + fnmat + fpmat
     return K.mean(loss * wmat, axis=-1)
 
 
@@ -51,13 +58,10 @@ def _net_resnet50(input_shape=(224, 224, 3)):
     def preprocess_tags(x):
         return x
 
-    res = ResNet50(include_top=False, input_shape=input_shape, weights='imagenet')
-    x = Flatten()(res.output)
-    shared_out = Dropout(0.1)(x)
+    res = ResNet50(include_top=False, input_shape=input_shape, weights=None)
+    shared_out = Flatten()(res.output)
 
-    # Add a classifier for each class instead of a single classifier.
-    # Concatenate classifiers and reshape to match output shape.
-    x = Dense(len(TAGS), activity_regularizer=l2(0.00001))(shared_out)
+    x = Dense(len(TAGS))(shared_out)
     x = Activation('sigmoid')(x)
     model = Model(inputs=res.input, outputs=x)
 
@@ -85,11 +89,11 @@ class ResNet50(object):
 
             # Training setup.
             'trn_epochs': 100,
-            'trn_augment_max_trn': 5,
+            'trn_augment_max_trn': 2,
             'trn_augment_max_val': 1,
             'trn_batch_size': 32,
-            'trn_optimizer': Adam,
-            'trn_optimizer_args': {'lr': 0.001},
+            'trn_optimizer': SGD,
+            'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': True},
             'trn_prop_trn': 0.9,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
@@ -148,7 +152,7 @@ class ResNet50(object):
         pprint(self.cfg)
 
         cb = [
-            # FineTuneCB(unfreeze_after=2, unfreeze_lr_mult=0.1),
+            PrintLRCB(),
             HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
@@ -181,6 +185,14 @@ class ResNet50(object):
             lambda x: np.roll(x, rng.randint(1, x.shape[0]), axis=rng.choice([0, 1]))
         ]
 
+        def crop(img):
+            h, w, _ = self.cfg['input_shape']
+            y0 = rng.randint(0, img.shape[0] - h)
+            x0 = rng.randint(0, img.shape[1] - w)
+            y1 = y0 + h
+            x1 = x0 + w
+            return img[y0:y1, x0:x1, :]
+
         while True:
 
             rng.shuffle(didxs)
@@ -195,7 +207,7 @@ class ResNet50(object):
                 for bidx in range(self.cfg['trn_batch_size']):
                     db[bidx] = next(didxs_cycle)
                     img = imgs.get(str(db[bidx]))[...]
-                    ib[bidx] = imresize(img, self.cfg['input_shape'])
+                    ib[bidx] = crop(img)
                     tb[bidx] = tags[db[bidx]]
                     for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max + 1)):
                         ib[bidx] = aug(ib[bidx])
