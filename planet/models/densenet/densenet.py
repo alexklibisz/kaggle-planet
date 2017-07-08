@@ -46,20 +46,15 @@ def _densenet121(input_shape=(224, 224, 3), pretrained=False):
     from planet.models.densenet.DN121 import densenet121_model
     from planet.utils.multi_gpu import make_parallel
 
-    def preprocess_jpg(x):
-        return x * 1. / 255.
-
-    def preprocess_tags(x):
-        return x
-
-    dns = densenet121_model(img_rows=input_shape[0], img_cols=input_shape[1],
-                            color_type=input_shape[2], dropout_rate=0.0, pretrained=pretrained)
+    preprocess = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')
+    dns = densenet121_model(img_rows=input_shape[0], img_cols=input_shape[1], color_type=input_shape[2],
+                            dropout_rate=0.0, pretrained=pretrained, preprocess_layer=preprocess)
     shared_out = dns.output
     x = Dense(len(TAGS), kernel_initializer='he_normal')(shared_out)
     x = Activation('sigmoid')(x)
     model = Model(inputs=dns.input, outputs=x)
 
-    return model, preprocess_jpg, preprocess_tags
+    return model
 
 
 def _densenet169(input_shape=(224, 224, 3), pretrained=False):
@@ -67,20 +62,14 @@ def _densenet169(input_shape=(224, 224, 3), pretrained=False):
     from planet.models.densenet.DN169 import densenet169_model
     from planet.utils.multi_gpu import make_parallel
 
-    def preprocess_jpg(x):
-        return x * 1. / 255.
-
-    def preprocess_tags(x):
-        return x
-
-    dns = densenet169_model(img_rows=input_shape[0], img_cols=input_shape[1],
-                            color_type=input_shape[2], dropout_rate=0.0, pretrained=pretrained)
+    preprocess = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')
+    dns = densenet169_model(img_rows=input_shape[0], img_cols=input_shape[1], color_type=input_shape[2],
+                            dropout_rate=0.0, pretrained=pretrained, preprocess_layer=preprocess)
     shared_out = dns.output
     x = Dense(len(TAGS), kernel_initializer='he_normal')(shared_out)
     x = Activation('sigmoid')(x)
     model = Model(inputs=dns.input, outputs=x)
-
-    return model, preprocess_jpg, preprocess_tags
+    return model
 
 
 def _densenet121_pretrained(input_shape=(224, 224, 3)):
@@ -103,13 +92,11 @@ class DenseNet121(object):
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
             'input_shape': (140, 140, 3),
-            'pp_imgs_func': lambda x: x,
-            'pp_tags_func': lambda x: x,
 
             # Network setup.
-            # 'net_builder_func': _densenet121,
+            'net_builder_func': _densenet121,
             # 'net_builder_func': _densenet169,
-            'net_builder_func': _densenet121_pretrained,
+            # 'net_builder_func': _densenet121_pretrained,
             # 'net_builder_func': _densenet169_pretrained,
             'net_loss_func': _loss_wbc,
 
@@ -119,8 +106,8 @@ class DenseNet121(object):
             'trn_augment_max_val': 0,
             'trn_batch_size': 44,
             'trn_optimizer': SGD,
-            # 'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': 1},
-            'trn_optimizer_args': {'lr': 0.001, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': 1},
+            'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': 1},
+            # 'trn_optimizer_args': {'lr': 0.001, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': 1},
             'trn_prop_trn': 0.9,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
@@ -130,17 +117,14 @@ class DenseNet121(object):
         }
 
         # Set up network.
-        self.net, ppif, pptf = self.cfg['net_builder_func'](self.cfg['input_shape'])
-        self.cfg['pp_imgs_func'], self.cfg['pp_tags_func'] = ppif, pptf
-
         if model_json:
-            pass
-            # fp = open(model_json, 'r')
-            # self.net = model_from_json(json.load(fp))
-            # fp.close()
+            from planet.models.densenet.scale_layer import Scale
+            self.net = model_from_json(model_json, {'Scale': Scale})
+        else:
+            self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
 
         if weights_path:
-            self.net.load_weights(weights_path)
+            self.net.load_weights(weights_path, by_name=True)
 
     @property
     def cpdir(self):
@@ -216,7 +200,7 @@ class DenseNet121(object):
                     for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max + 1)):
                         ib[bidx] = aug(ib[bidx])
 
-                yield self.cfg['pp_imgs_func'](ib), self.cfg['pp_tags_func'](tb)
+                yield ib, tb
 
     def predict_batch(self, imgs_batch):
         """Predict a single batch of images with augmentation. Augmentations vectorized
@@ -228,10 +212,11 @@ class DenseNet121(object):
             lambda x: x[:, :, ::-1],                              # hflip
             lambda x: np.rot90(x, 1, axes=(1, 2)),                # +90
             lambda x: np.rot90(x, 2, axes=(1, 2)),                # +180
-            lambda x: np.rot90(x, 3, axes=(1, 2))                 # +270
+            lambda x: np.rot90(x, 3, axes=(1, 2)),                # +270
+            lambda x: np.rot90(x, 1, axes=(1, 2))[:, ::-1, ...],  # vflip(+90)
+            lambda x: np.rot90(x, 1, axes=(1, 2))[:, :, ::-1]     # vflip(+90)
         ]
 
-        imgs_batch = self.cfg['pp_imgs_func'](imgs_batch)
         yp = np.zeros((imgs_batch.shape[0], len(TAGS)))
         for aug_func in aug_funcs:
             imgs_batch = aug_func(imgs_batch)

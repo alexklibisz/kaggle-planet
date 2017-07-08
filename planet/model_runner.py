@@ -42,12 +42,18 @@ def predict(model_class, args):
 
     logger = logging.getLogger(funcname())
 
+    if args['json']:
+        fp = open(args['json'], 'r')
+        args['json'] = json.load(fp)
+        fp.close()
+
     # Predictions for training data.
     model = model_class(args['json'], args['weights'])
     model.cfg['cpdir'] = '/'.join(args['weights'].split('/')[:-1])
     names, yt_trn, yp_trn = model.predict('train')
 
     # Compute thresholds for each tag.
+    logger.info('Optimizing thresholds')
     thresh_def = np.ones(len(TAGS)) * 0.5
     thresh_opt = optimize_thresholds(yt_trn, yp_trn)
     logger.info('Optimized thresholds: %s' % str(thresh_opt))

@@ -18,7 +18,7 @@ from planet.models.densenet.scale_layer import Scale
 
 
 def densenet121_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth_rate=32, nb_filter=64, reduction=0.5,
-                      dropout_rate=0.0, weight_decay=1e-4, num_classes=None, pretrained=False):
+                      dropout_rate=0.0, weight_decay=1e-4, num_classes=None, pretrained=False, preprocess_layer=None):
     '''
     DenseNet 121 Model for Keras
 
@@ -59,8 +59,13 @@ def densenet121_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth
     nb_filter = 64
     nb_layers = [6, 12, 24, 16]  # For DenseNet-121
 
+    if preprocess_layer:
+        x = preprocess_layer(img_input)
+    else:
+        x = img_input
+
     # Initial convolution
-    x = ZeroPadding2D((3, 3), name='conv1_zeropadding')(img_input)
+    x = ZeroPadding2D((3, 3), name='conv1_zeropadding')(x)
     x = Convolution2D(nb_filter, 7, 7, subsample=(2, 2), name='conv1', bias=False)(x)
     x = BatchNormalization(epsilon=eps, axis=concat_axis, name='conv1_bn')(x)
     x = Scale(axis=concat_axis, name='conv1_scale')(x)
