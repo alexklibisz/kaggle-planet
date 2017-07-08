@@ -3,6 +3,7 @@ import h5py
 import json
 import logging
 import numpy as np
+import os
 import pandas as pd
 import tensorflow as tf
 from time import time
@@ -11,9 +12,12 @@ sys.path.append('.')
 from planet.utils.data_utils import optimize_thresholds, tags_f2pr, f2pr, TAGS, binary_to_tagstr
 from planet.utils.runtime import funcname
 
+np.random.seed(int(time()) + os.getpid())
+tf.set_random_seed(1+int(time()) + os.getpid())
+
+# Overwrite the random seed
 np.random.seed(317)
 tf.set_random_seed(318)
-
 
 def train(model_class, args):
 
@@ -50,7 +54,13 @@ def predict(model_class, args):
     # Predictions for training data.
     model = model_class(args['json'], args['weights'])
     model.cfg['cpdir'] = '/'.join(args['weights'].split('/')[:-1])
-    names, yt_trn, yp_trn = model.predict('train')
+    names_trn, yt_trn, yp_trn = model.predict('train')
+    names_tst, _, yp_tst = model.predict('test')
+
+    optimize_submit(model.cpdir, names_trn, names_tst, yt_trn, yp_trn, yp_tst)
+
+def optimize_submit(cpdir, names_trn, names_tst, yt_trn, yp_trn, yp_tst):
+    logger = logging.getLogger(funcname())
 
     # Compute thresholds for each tag.
     logger.info('Optimizing thresholds')
@@ -76,27 +86,26 @@ def predict(model_class, args):
 
     # Save submissions for training and testing with and without optimization.
     t = int(time())
-    csv_path = '%s/submission_trn_def_%d.csv' % (model.cpdir, t)
-    submission(names, yp_trn_def, csv_path)
+    csv_path = '%s/submission_trn_def_%d.csv' % (cpdir, t)
+    submission(names_trn, yp_trn_def, csv_path)
 
-    csv_path = '%s/submission_trn_opt_%d.csv' % (model.cpdir, t)
-    submission(names, yp_trn_opt, csv_path)
+    csv_path = '%s/submission_trn_opt_%d.csv' % (cpdir, t)
+    submission(names_trn, yp_trn_opt, csv_path)
 
-    names, _, yp_tst = model.predict('test')
     yp_tst_def = (yp_tst > thresh_def).astype(np.uint8)
-    csv_path = '%s/submission_tst_def_%d.csv' % (model.cpdir, t)
-    submission(names, yp_tst_def, csv_path)
+    csv_path = '%s/submission_tst_def_%d.csv' % (cpdir, t)
+    submission(names_tst, yp_tst_def, csv_path)
 
     yp_tst_opt = (yp_tst > thresh_opt).astype(np.uint8)
-    csv_path = '%s/submission_tst_opt_%d.csv' % (model.cpdir, t)
-    submission(names, yp_tst_opt, csv_path)
+    csv_path = '%s/submission_tst_opt_%d.csv' % (cpdir, t)
+    submission(names_tst, yp_tst_opt, csv_path)
 
     # Save raw activations.
-    np_path = '%s/yp_trn_%d.npy' % (model.cpdir, t)
+    np_path = '%s/yp_trn_%d.npy' % (cpdir, t)
     np.save(np_path, yp_trn)
     logger.info('Saved %s.' % np_path)
 
-    np_path = '%s/yp_tst_%d.npy' % (model.cpdir, t)
+    np_path = '%s/yp_tst_%d.npy' % (cpdir, t)
     np.save(np_path, yp_tst)
     logger.info('Saved %s.' % np_path)
 
