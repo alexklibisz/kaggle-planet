@@ -76,15 +76,11 @@ def correct_tags(tags):
     return tags
 
 
-def get_train_val_idxs(hdf5_path, prop_data=1.0, prop_trn=0.8, rng=None, nb_iter=2000):
+def get_train_val_idxs(tags, prop_data=1.0, prop_trn=0.8, rng=None, nb_iter=2000):
     '''Picks the random training and validation indexes from the given array of tags
     that minimizes the mean absolute error relative the full dataset.'''
     if rng is None:
         rng = np.random
-
-    f = h5py.File(hdf5_path, 'r')
-    tags = f.get('tags')[...].astype(np.float32)
-    f.close()
 
     dist_full = np.sum(tags, axis=0) / len(tags)
     best, min_mae = None, 1e10
@@ -295,14 +291,18 @@ def tags_f2pr(yt, yp, thresholds):
 # Given a matrix of yt and yp, where each row is a separate prediction and each column
 # is for a separate tag, this returns a F2 scores, recall, and precision for each tag
 # for each threshold in the thresholds_to_try array
+
+
 def _tags_f2pr(yt, yp, thresholds_to_try):
-    yp = (yp > thresholds_to_try[:,None,None]).astype(np.uint8)
-    yt = yt[None,:,:]
+    yp = (yp > thresholds_to_try[:, None, None]).astype(np.uint8)
+    yt = yt[None, :, :]
     return f2pr(yt, yp, axis=1)
 
 # Given a matrix of yt and yp, where each row is a separate prediction and each column
 # is a separate label, this returns  F2 scores, one for each label
 # Note: this assumes you've already taken care of the thresholding for yp
+
+
 def f2pr(yt, yp, axis=None):
     tp = np.sum(yt * yp, axis=axis)
     fp = np.sum(np.clip(yp - yt, 0, 1), axis=axis)
@@ -311,16 +311,17 @@ def f2pr(yt, yp, axis=None):
     # p = tp/(tp + fp + 1e-1)
     # r = tp/(tp + fn + 1e-1)
 
-    p = np.divide(tp, (np.add(np.add(tp,fp,dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
-    r = np.divide(tp, (np.add(np.add(tp,fn,dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
+    p = np.divide(tp, (np.add(np.add(tp, fp, dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
+    r = np.divide(tp, (np.add(np.add(tp, fn, dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
     b = 2.0
     f2 = (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7))
     return f2, p, r
 
+
 def optimize_thresholds(yt, yp, n=101):
-    thresholds_to_try = np.linspace(0,1,n)
-    f2,_,_ = _tags_f2pr(yt, yp, thresholds_to_try)
+    thresholds_to_try = np.linspace(0, 1, n)
+    f2, _, _ = _tags_f2pr(yt, yp, thresholds_to_try)
 
     # Find the thresholds that gave the highest f2 score
-    best_indices = np.argmax(f2,axis=0)
+    best_indices = np.argmax(f2, axis=0)
     return thresholds_to_try[best_indices]

@@ -7,27 +7,26 @@ from keras.layers.convolutional import Convolution2D
 from keras.layers.pooling import AveragePooling2D, GlobalAveragePooling2D, MaxPooling2D
 from keras.layers.normalization import BatchNormalization
 from keras.models import Model
-from keras.layers.core import Layer
-from keras.engine import InputSpec
-from keras import initializers as initializations
 import keras.backend as K
+
 from sklearn.metrics import log_loss
 
 # from custom_layers.scale_layer import Scale
 from planet.models.densenet.scale_layer import Scale
 
+from load_cifar10 import load_cifar10_data
 
-def densenet121_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth_rate=32, nb_filter=64, reduction=0.5,
-                      dropout_rate=0.0, weight_decay=1e-4, num_classes=None, pretrained=False):
+
+def densenet169_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth_rate=32, nb_filter=64, reduction=0.5, dropout_rate=0.0, weight_decay=1e-4, num_classes=None):
     '''
-    DenseNet 121 Model for Keras
+    DenseNet 169 Model for Keras
 
     Model Schema is based on 
     https://github.com/flyyufelix/DenseNet-Keras
 
     ImageNet Pretrained Weights 
-    Theano: https://drive.google.com/open?id=0Byy2AcGyEVxfMlRYb3YzV210VzQ
-    TensorFlow: https://drive.google.com/open?id=0Byy2AcGyEVxfSTA4SHJVOHNuTXc
+    Theano: https://drive.google.com/open?id=0Byy2AcGyEVxfN0d3T1F1MXg0NlU
+    TensorFlow: https://drive.google.com/open?id=0Byy2AcGyEVxfSEc5UC1ROUFJdmM
 
     # Arguments
         nb_dense_block: number of dense blocks to add to end
@@ -50,14 +49,14 @@ def densenet121_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth
     global concat_axis
     if K.image_dim_ordering() == 'tf':
         concat_axis = 3
-        img_input = Input(shape=(img_rows, img_cols, color_type), name='data')
+        img_input = Input(shape=(224, 224, 3), name='data')
     else:
         concat_axis = 1
-        img_input = Input(shape=(color_type, img_rows, img_cols), name='data')
+        img_input = Input(shape=(3, 224, 224), name='data')
 
     # From architecture for ImageNet (Table 1 in the paper)
     nb_filter = 64
-    nb_layers = [6, 12, 24, 16]  # For DenseNet-121
+    nb_layers = [6, 12, 32, 32]  # For DenseNet-169
 
     # Initial convolution
     x = ZeroPadding2D((3, 3), name='conv1_zeropadding')(img_input)
@@ -93,15 +92,13 @@ def densenet121_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth
 
     model = Model(img_input, x_fc, name='densenet')
 
-    if pretrained:
-        model.load_weights('data/weights/densenet121_weights_tf.h5', by_name=True)
-
     # if K.image_dim_ordering() == 'th':
     #     # Use pre-trained weights for Theano backend
-    #     weights_path = 'imagenet_models/densenet121_weights_th.h5'
+    #     weights_path = 'imagenet_models/densenet169_weights_th.h5'
     # else:
     #     # Use pre-trained weights for Tensorflow backend
-    #     weights_path = 'imagenet_models/densenet121_weights_tf.h5'
+    #     weights_path = 'imagenet_models/densenet169_weights_tf.h5'
+
     # model.load_weights(weights_path, by_name=True)
 
     # Truncate and replace softmax layer for transfer learning
@@ -223,25 +220,23 @@ if __name__ == '__main__':
     batch_size = 16
     nb_epoch = 10
 
-    # # Load Cifar10 data. Please implement your own load_data() module for your own dataset
-    # X_train, Y_train, X_valid, Y_valid = load_cifar10_data(img_rows, img_cols)
+    # Load Cifar10 data. Please implement your own load_data() module for your own dataset
+    X_train, Y_train, X_valid, Y_valid = load_cifar10_data(img_rows, img_cols)
 
     # Load our model
-    model = densenet121_model(img_rows=img_rows, img_cols=img_cols, color_type=channel, num_classes=num_classes)
-    import pdb
-    pdb.set_trace()
+    model = densenet169_model(img_rows=img_rows, img_cols=img_cols, color_type=channel, num_classes=num_classes)
 
-    # # Start Fine-tuning
-    # model.fit(X_train, Y_train,
-    #           batch_size=batch_size,
-    #           nb_epoch=nb_epoch,
-    #           shuffle=True,
-    #           verbose=1,
-    #           validation_data=(X_valid, Y_valid),
-    #           )
+    # Start Fine-tuning
+    model.fit(X_train, Y_train,
+              batch_size=batch_size,
+              nb_epoch=nb_epoch,
+              shuffle=True,
+              verbose=1,
+              validation_data=(X_valid, Y_valid),
+              )
 
-    # # Make predictions
-    # predictions_valid = model.predict(X_valid, batch_size=batch_size, verbose=1)
+    # Make predictions
+    predictions_valid = model.predict(X_valid, batch_size=batch_size, verbose=1)
 
-    # # Cross-entropy loss score
-    # score = log_loss(Y_valid, predictions_valid)
+    # Cross-entropy loss score
+    score = log_loss(Y_valid, predictions_valid)

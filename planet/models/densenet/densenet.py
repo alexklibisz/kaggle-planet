@@ -1,7 +1,7 @@
 from itertools import cycle
 from keras.optimizers import SGD, Adam
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
-from keras.models import Model
+from keras.models import Model, model_from_json
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
 from keras.layers.advanced_activations import PReLU
 from keras.regularizers import l2
@@ -9,6 +9,7 @@ from pprint import pprint
 from scipy.misc import imresize
 from scipy.ndimage.interpolation import rotate
 from time import sleep, time
+from tqdm import tqdm
 import json
 import h5py
 import keras.backend as K
@@ -40,7 +41,7 @@ def _loss_wbc(yt, yp):
     return K.mean(loss * wmat, axis=-1)
 
 
-def _net_densenet121_sigmoid(input_shape=(224, 224, 3)):
+def _densenet121(input_shape=(224, 224, 3), pretrained=False):
 
     from planet.models.densenet.DN121 import densenet121_model
     from planet.utils.multi_gpu import make_parallel
@@ -52,18 +53,18 @@ def _net_densenet121_sigmoid(input_shape=(224, 224, 3)):
         return x
 
     dns = densenet121_model(img_rows=input_shape[0], img_cols=input_shape[1],
-                            color_type=input_shape[2], dropout_rate=0.2)
+                            color_type=input_shape[2], dropout_rate=0.0, pretrained=pretrained)
     shared_out = dns.output
-    x = Dense(len(TAGS))(shared_out)
+    x = Dense(len(TAGS), kernel_initializer='he_normal')(shared_out)
     x = Activation('sigmoid')(x)
     model = Model(inputs=dns.input, outputs=x)
 
     return model, preprocess_jpg, preprocess_tags
 
 
-def _net_densenet121_softmax(input_shape=(224, 224, 3)):
+def _densenet169(input_shape=(224, 224, 3), pretrained=False):
 
-    from planet.models.densenet.DN121 import densenet121_model
+    from planet.models.densenet.DN169 import densenet169_model
     from planet.utils.multi_gpu import make_parallel
 
     def preprocess_jpg(x):
@@ -72,21 +73,29 @@ def _net_densenet121_softmax(input_shape=(224, 224, 3)):
     def preprocess_tags(x):
         return x
 
-    dns = densenet121_model(img_rows=input_shape[0], img_cols=input_shape[1], color_type=input_shape[2])
+    dns = densenet169_model(img_rows=input_shape[0], img_cols=input_shape[1],
+                            color_type=input_shape[2], dropout_rate=0.0, pretrained=pretrained)
     shared_out = dns.output
-    classifiers = [Dense(2, activation='softmax')(shared_out) for t in TAGS]
-    x = concatenate(classifiers, axis=-1)
-    x = Reshape((len(TAGS), 2))(x)
-    x = Lambda(lambda x: x[:, :, 0])(x)
+    x = Dense(len(TAGS), kernel_initializer='he_normal')(shared_out)
+    x = Activation('sigmoid')(x)
     model = Model(inputs=dns.input, outputs=x)
 
     return model, preprocess_jpg, preprocess_tags
 
 
+def _densenet121_pretrained(input_shape=(224, 224, 3)):
+    return _densenet121(input_shape, pretrained=True)
+
+
+def _densenet169_pretrained(input_shape=(224, 224, 3)):
+    return _densenet169(input_shape, pretrained=True)
+
+
 class DenseNet121(object):
 
-    def __init__(self):
+    def __init__(self, model_json=None, weights_path=None):
 
+        # Configuration.
         self.cfg = {
 
             # Data setup.
@@ -96,11 +105,10 @@ class DenseNet121(object):
             'input_shape': (140, 140, 3),
             'pp_imgs_func': lambda x: x,
             'pp_tags_func': lambda x: x,
-            'imgs_resize_crop': 'resize',
 
             # Network setup.
-            # 'net_builder_func': _net_densenet121_softmax,
-            'net_builder_func': _net_densenet121_sigmoid,
+            'net_builder_func': _densenet121,
+            # 'net_builder_func': _densenet121_pretrained,
             'net_loss_func': _loss_wbc,
 
             # Training setup.
@@ -108,17 +116,26 @@ class DenseNet121(object):
             'trn_augment_max_trn': 5,
             'trn_augment_max_val': 0,
             'trn_batch_size': 44,
-            # 'trn_optimizer': Adam,
-            # 'trn_optimizer_args': {'lr': 0.1},
             'trn_optimizer': SGD,
-            'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': True},
+            'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': 1},
+            # 'trn_optimizer_args': {'lr': 0.001, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': 1},
             'trn_prop_trn': 0.9,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
 
             # Testing.
-            'tst_batch_size': 1000
+            'tst_batch_size': 1500
         }
+
+        # Set up network.
+        self.net, ppif, pptf = self.cfg['net_builder_func'](self.cfg['input_shape'])
+        self.cfg['pp_imgs_func'], self.cfg['pp_tags_func'] = ppif, pptf
+
+        if model_json:
+            self.net = model_from_json(model_json)
+
+        if weights_path:
+            self.net.load_weights(weights_path)
 
     @property
     def cpdir(self):
@@ -126,29 +143,24 @@ class DenseNet121(object):
             os.mkdir(self.cfg['cpdir'])
         return self.cfg['cpdir']
 
-    def train(self, weights_path=None, callbacks=[]):
-
-        # Network setup.
-        net, self.cfg['pp_imgs_func'], self.cfg['pp_tags_func'] = \
-            self.cfg['net_builder_func'](self.cfg['input_shape'])
-        json.dump(net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
+    def serialize(self):
+        json.dump(self.net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
         json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
+        pprint(self.cfg)
+
+    def train(self, callbacks=[]):
 
         # Data setup.
-        idxs_trn, idxs_val = get_train_val_idxs(self.cfg['hdf5_path_trn'], self.cfg['trn_prop_data'],
-                                                self.cfg['trn_prop_trn'])
-        steps_trn = max(math.ceil(len(idxs_trn) / self.cfg['trn_batch_size']), 400)
-        steps_val = max(math.ceil(len(idxs_val) / self.cfg['trn_batch_size']), 20)
-        gen_trn = self.batch_gen(idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
-        gen_val = self.batch_gen(idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
+        data = h5py.File(self.cfg['hdf5_path_trn'])
+        tags = data.get('tags')[...]
+        idxs_trn, idxs_val = get_train_val_idxs(tags, self.cfg['trn_prop_data'], self.cfg['trn_prop_trn'])
+        steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
+        steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
+        gen_trn = self.batch_gen(data, idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
+        gen_val = self.batch_gen(data, idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
 
         opt = self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args'])
-        net.compile(optimizer=opt, loss=self.cfg['net_loss_func'], metrics=[F2, prec, reca] + tag_metrics())
-
-        net.summary()
-        if weights_path is not None:
-            net.load_weights(weights_path)
-        pprint(self.cfg)
+        self.net.compile(optimizer=opt, loss=self.cfg['net_loss_func'], metrics=[F2, prec, reca] + tag_metrics())
 
         cb = [
             ValidationCB(self.cfg['cpdir'], gen_val, self.cfg['trn_batch_size'], steps_val),
@@ -165,16 +177,15 @@ class DenseNet121(object):
         if self.cfg['trn_monitor_val']:
             cb.append(EarlyStopping(monitor='val_F2', min_delta=0.01, patience=20, verbose=1, mode='max'))
 
-        train = net.fit_generator(gen_trn, steps_per_epoch=steps_trn, epochs=self.cfg[
-                                  'trn_epochs'], verbose=1, callbacks=cb)
+        train = self.net.fit_generator(gen_trn, steps_per_epoch=steps_trn,
+                                       epochs=self.cfg['trn_epochs'], verbose=1, callbacks=cb)
 
         return train.history
 
-    def batch_gen(self, didxs, nb_steps, nb_augment_max, yield_didxs=False):
+    def batch_gen(self, data, didxs, nb_steps, nb_augment_max, yield_didxs=False):
 
-        data = h5py.File(self.cfg['hdf5_path_trn'], 'r')
         imgs = data.get('images')
-        tags = data.get('tags')[:, :]
+        tags = data.get('tags')[...]
         ib_shape = (self.cfg['trn_batch_size'],) + self.cfg['input_shape']
         tb_shape = (self.cfg['trn_batch_size'], len(TAGS))
         aug_funcs = [
@@ -182,14 +193,6 @@ class DenseNet121(object):
             lambda x: np.rot90(x, rng.randint(1, 4)),
             lambda x: np.roll(x, rng.randint(1, x.shape[0]), axis=rng.choice([0, 1]))
         ]
-
-        def crop(img):
-            h, w, _ = self.cfg['input_shape']
-            y0 = rng.randint(0, img.shape[0] - h)
-            x0 = rng.randint(0, img.shape[1] - w)
-            y1 = y0 + h
-            x1 = x0 + w
-            return img[y0:y1, x0:x1, :]
 
         while True:
 
@@ -203,17 +206,54 @@ class DenseNet121(object):
 
                 for bidx in range(self.cfg['trn_batch_size']):
                     didx = next(didxs_cycle)
-                    img = imgs.get(str(didx))[...]
-                    if self.cfg['imgs_resize_crop'] == 'resize':
-                        ib[bidx] = imresize(img, self.cfg['input_shape'])
-                    else:
-                        ib[bidx] = crop(imgs.get(str(didx))[...])
+                    ib[bidx] = imresize(imgs[didx, ...], self.cfg['input_shape'])
                     tb[bidx] = tags[didx]
                     for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max + 1)):
                         ib[bidx] = aug(ib[bidx])
 
                 yield self.cfg['pp_imgs_func'](ib), self.cfg['pp_tags_func'](tb)
 
+    def predict_batch(self, imgs_batch):
+        """Predict a single batch of images with augmentation. Augmentations vectorized
+        across the entire batch and predictions averaged."""
+
+        aug_funcs = [
+            lambda x: x,
+            lambda x: x[:, ::-1, ...],
+            lambda x: x[:, :, ::-1],
+            lambda x: np.rot90(x, 1, axes=(1, 2)),
+            lambda x: np.rot90(x, 2, axes=(1, 2)),
+            lambda x: np.rot90(x, 3, axes=(1, 2))
+        ]
+
+        imgs_batch = self.cfg['pp_imgs_func'](imgs_batch)
+        yp = np.zeros((imgs_batch.shape[0], len(TAGS)))
+        for aug_func in aug_funcs:
+            imgs_batch = aug_func(imgs_batch)
+            tags_batch = self.net.predict(imgs_batch)
+            yp += tags_batch / len(aug_funcs)
+
+        return yp
+
+    def predict(self, dataset):
+
+        path = self.cfg['hdf5_path_trn'] if dataset == 'train' else self.cfg['hdf5_path_tst']
+        data = h5py.File(path)
+        yt = data.get('tags')[...]
+        yp = np.zeros(yt.shape, dtype=np.float32)
+        imgs = data.get('images')
+        names = data.attrs['names'].split(',')
+        imgs_batch = np.zeros((self.cfg['tst_batch_size'], *self.cfg['input_shape']), dtype=np.float32)
+
+        for didx in tqdm(range(0, len(imgs), self.cfg['tst_batch_size'])):
+            bsz = min(self.cfg['tst_batch_size'], len(imgs) - didx)
+            for bidx in range(bsz):
+                imgs_batch[bidx] = imresize(imgs[didx + bidx, ...], self.cfg['input_shape'])
+            yp[didx:didx + bsz] = self.predict_batch(imgs_batch[:bsz])
+
+        return names, yt, yp
+
+
 if __name__ == "__main__":
     from planet.model_runner import model_runner
-    model_runner(DenseNet121())
+    model_runner(DenseNet121)

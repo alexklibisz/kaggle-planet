@@ -1,112 +1,115 @@
-# Generic function that abstracts away all the model yuckiness.
 import argparse
+import h5py
+import json
 import logging
-import tifffile as tif
-import pandas as pd
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from time import time
-from skimage.transform import resize
-from scipy.misc import imread
-from sklearn.metrics import precision_score, recall_score
-from planet.utils.data_utils import bool_F2, tagstr_to_binary, binary_to_tagstr, correct_tags
-
-# np.random.seed(1499006546)
-# tf.set_random_seed(1499006546)
+import sys
+sys.path.append('.')
+from planet.utils.data_utils import optimize_thresholds, tags_f2pr, f2pr, TAGS, binary_to_tagstr
+from planet.utils.runtime import funcname
 
 np.random.seed(317)
 tf.set_random_seed(318)
 
 
-def model_runner(model):
+def train(model_class, args):
+
+    if args['json']:
+        fp = open(args['json'], 'r')
+        args['json'] = json.load(fp)
+        fp.close()
+
+    model = model_class(model_json=args['json'], weights_path=args['weights'])
+    model.serialize()
+    return model.train()
+
+
+def submission(names, yp, csv_path):
+    logger = logging.getLogger(funcname())
+    df_rows = [[names[i], binary_to_tagstr(yp[i, :])] for i in range(yp.shape[0])]
+    df_sub = pd.DataFrame(df_rows, columns=['image_name', 'tags'])
+    df_sub.to_csv(csv_path, index=False)
+    logger.info('Saved %s.' % csv_path)
+
+
+def predict(model_class, args):
+    """Uses the given model to make predictions, convert them into strings, and save
+    them to a CSV file. Uses the training data to pick the best threshold for each 
+    output activation. Saves both the optimized and regular thresholds."""
+
+    logger = logging.getLogger(funcname())
+
+    # Predictions for training data.
+    model = model_class(args['json'], args['weights'])
+    model.cfg['cpdir'] = '/'.join(args['weights'].split('/')[:-1])
+    names, yt_trn, yp_trn = model.predict('train')
+
+    # Compute thresholds for each tag.
+    thresh_def = np.ones(len(TAGS)) * 0.5
+    thresh_opt = optimize_thresholds(yt_trn, yp_trn)
+    logger.info('Optimized thresholds: %s' % str(thresh_opt))
+
+    yp_trn_def = (yp_trn > thresh_def).astype(np.uint8)
+    yp_trn_opt = (yp_trn > thresh_opt).astype(np.uint8)
+    f2t_def, pt_def, rt_def = tags_f2pr(yt_trn, yp_trn_def, thresh_def)
+    f2t_opt, pt_opt, rt_opt = tags_f2pr(yt_trn, yp_trn_opt, thresh_opt)
+
+    # Print metrics for each tag.
+    for i, t in enumerate(TAGS):
+        logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf t=%.3lf' % (t, f2t_def[i], pt_def[i], rt_def[i], thresh_def[i]))
+        logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf t=%.3lf' % (t, f2t_opt[i], pt_opt[i], rt_opt[i], thresh_opt[i]))
+
+    # Print aggregate metrics.
+    f2_def, p_def, r_def = f2pr(yt_trn, yp_trn_def)
+    f2_opt, p_opt, r_opt = f2pr(yt_trn, yp_trn_opt)
+    logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf' % ('Def. aggregate', f2_def, p_def, r_def))
+    logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf' % ('Opt. aggregate', f2_opt, p_opt, r_opt))
+
+    t = int(time())
+    csv_path = '%s/submission_trn_def_%d.csv' % (model.cpdir, t)
+    submission(names, yp_trn_def, csv_path)
+
+    csv_path = '%s/submission_trn_opt_%d.csv' % (model.cpdir, t)
+    submission(names, yp_trn_opt, csv_path)
+
+    names, _, yp_tst = model.predict('test')
+    yp_tst_def = (yp_tst > thresh_def).astype(np.uint8)
+    csv_path = '%s/submission_tst_def_%d.csv' % (model.cpdir, t)
+    submission(names, yp_tst_def, csv_path)
+
+    yp_tst_opt = (yp_tst > thresh_opt).astype(np.uint8)
+    csv_path = '%s/submission_tst_opt_%d.csv' % (model.cpdir, t)
+    submission(names, yp_tst_opt, csv_path)
+
+
+def model_runner(model_class):
 
     logging.basicConfig(level=logging.INFO)
-    model_name = type(model).__name__
-    logger = logging.getLogger(model_name)
+    logger = logging.getLogger(__name__)
 
-    parser = argparse.ArgumentParser(description='%s Model...' % model_name)
+    parser = argparse.ArgumentParser(description='Model runner.')
     sub = parser.add_subparsers(title='actions', description='Choose an action.')
 
     # Training.
-    parser_train = sub.add_parser('train', help='training')
-    parser_train.set_defaults(which='train')
-    parser_train.add_argument('-w', '--weights', help='network weights')
+    p = sub.add_parser('train', help='training')
+    p.set_defaults(which='train')
+    p.add_argument('-j', '--json', help='model JSON definition')
+    p.add_argument('-w', '--weights', help='network weights')
 
-    # Optimizing.
-    parser_train = sub.add_parser('optimize', help='optimizing')
-    parser_train.set_defaults(which='optimize')
-    parser_train.add_argument('-w', '--weights', help='network weights')
-
-    # Visualizing.
-    parser_train = sub.add_parser('visualize', help='optimizing')
-    parser_train.set_defaults(which='visualize')
-    parser_train.add_argument('-w', '--weights', help='network weights')
-
-    # Prediction / submission.
-    parser_predict = sub.add_parser('predict', help='make predictions')
-    parser_predict.set_defaults(which='predict')
-    parser_predict.add_argument('dataset', help='dataset', choices=['train', 'test'])
-    parser_predict.add_argument('-w', '--weights', help='network weights', required=True)
+    # Prediction.
+    p = sub.add_parser('predict', help='make predictions')
+    p.set_defaults(which='predict')
+    p.add_argument('-j', '--json', help='model JSON definition')
+    p.add_argument('-w', '--weights', help='path to network weights', required=True)
 
     args = vars(parser.parse_args())
-    assert args['which'] in ['train', 'predict', 'optimize', 'visualize']
+    assert args['which'] in ['train', 'predict']
 
     if args['which'] == 'train':
-        model.train(args['weights'])
+        return train(model_class, args)
 
-    elif args['which'] == 'predict' and args['dataset'] == 'train':
-        df = pd.read_csv(model.config['imgs_csv_trn'])
-        prec_scores, reca_scores, F2_scores = [], [], []
-
-        # Reading images, making predictions in batches, tracking F2 scores.
-        for idx in range(0, df.shape[0], model.config['batch_size_tst']):
-
-            # Read images, extract tags.
-            img_names = df[idx:idx + model.config['batch_size_tst']]['image_name'].values
-            tags_true = df[idx:idx + model.config['batch_size_tst']]['tags'].values
-            tags_pred = model.predict(img_names)
-            for tt, tp in zip(tags_true, tags_pred):
-                tt = tagstr_to_binary(tt)
-                F2_scores.append(bool_F2(tt, tp))
-                prec_scores.append(precision_score(tt, tp))
-                reca_scores.append(recall_score(tt, tp))
-
-            # Progress and metrics...
-            logger.info('%d/%d F2 running=%.4lf, F2 batch=%.4lf' %
-                        (idx, df.shape[0], np.mean(F2_scores), np.mean(F2_scores[idx:])))
-            logger.info('%d/%d prec running=%.4lf, prec batch=%.4lf' %
-                        (idx, df.shape[0], np.mean(prec_scores), np.mean(prec_scores[idx:])))
-            logger.info('%d/%d reca running=%.4lf, reca batch=%.4lf' %
-                        (idx, df.shape[0], np.mean(reca_scores), np.mean(reca_scores[idx:])))
-
-        logger.info('F2 final = %lf' % np.mean(F2_scores))
-
-    elif args['which'] == 'predict' and args['dataset'] == 'test':
-        df = pd.read_csv(model.config['imgs_csv_tst'])
-        submission_rows = []
-        sub_path = '%s/submission_%s.csv' % (model.cpdir, str(int(time())))
-
-        # Reading images, making predictions in batches.
-        for idx in range(0, df.shape[0], model.config['batch_size_tst']):
-
-            img_names = df[idx:idx + model.config['batch_size_tst']]['image_name'].values
-            tags_pred = model.predict(img_names)
-
-            for img_name, tp in zip(img_names, tags_pred):
-                tpstr = binary_to_tagstr(tp)
-                submission_rows.append([img_name, tpstr])
-
-            # Progress...
-            logger.info('%d/%d' % (idx, df.shape[0]))
-
-        # Convert list of lists to dataframe and save.
-        df_sub = pd.DataFrame(submission_rows, columns=['image_name', 'tags'])
-        df_sub.to_csv(sub_path, index=False)
-        logger.info('Submission saved to %s.' % sub_path)
-
-    # Experimental threshold optimization.
-    elif args['which'] == 'optimize':
-        model.optimize()
-
-    elif args['which'] == 'visualize':
-        model.visualize_activation()
+    if args['which'] == 'predict':
+        return predict(model_class, args)
