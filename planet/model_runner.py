@@ -68,6 +68,7 @@ def predict(model_class, args):
     logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf' % ('Def. aggregate', f2_def, p_def, r_def))
     logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf' % ('Opt. aggregate', f2_opt, p_opt, r_opt))
 
+    # Save submissions for training and testing with and without optimization.
     t = int(time())
     csv_path = '%s/submission_trn_def_%d.csv' % (model.cpdir, t)
     submission(names, yp_trn_def, csv_path)
@@ -83,6 +84,15 @@ def predict(model_class, args):
     yp_tst_opt = (yp_tst > thresh_opt).astype(np.uint8)
     csv_path = '%s/submission_tst_opt_%d.csv' % (model.cpdir, t)
     submission(names, yp_tst_opt, csv_path)
+
+    # Save raw activations.
+    np_path = '%s/yp_trn_%d.npy' % (model.cpdir, t)
+    np.save(np_path, yp_trn)
+    logger.info('Saved %s.' % np_path)
+
+    np_path = '%s/yp_tst_%d.npy' % (model.cpdir, t)
+    np.save(np_path, yp_tst)
+    logger.info('Saved %s.' % np_path)
 
 
 def model_runner(model_class):

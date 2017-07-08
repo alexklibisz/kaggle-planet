@@ -34,7 +34,7 @@ def _loss_wbc(yt, yp):
     # Compute weight matrix, scaled by the error at each tag.
     # Assumes a positive/negative threshold at 0.5.
     yp = K.round(yp)
-    fnwgt, fpwgt = 3., 1.
+    fnwgt, fpwgt = 4., 1.
     fnmat = K.clip(yt - yp, 0, 1) * (fnwgt - 1)
     fpmat = K.clip(yp - yt, 0, 1) * (fpwgt - 1)
     wmat = fnmat + fpmat + 1
@@ -99,7 +99,7 @@ class DenseNet121(object):
         self.cfg = {
 
             # Data setup.
-            'cpdir': 'checkpoints/DenseNet121_%d_%d' % (int(time()), os.getpid()),
+            'cpdir': 'checkpoints/DenseNet_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
             'input_shape': (140, 140, 3),
@@ -107,8 +107,10 @@ class DenseNet121(object):
             'pp_tags_func': lambda x: x,
 
             # Network setup.
-            'net_builder_func': _densenet121,
-            # 'net_builder_func': _densenet121_pretrained,
+            # 'net_builder_func': _densenet121,
+            # 'net_builder_func': _densenet169,
+            'net_builder_func': _densenet121_pretrained,
+            # 'net_builder_func': _densenet169_pretrained,
             'net_loss_func': _loss_wbc,
 
             # Training setup.
@@ -117,8 +119,8 @@ class DenseNet121(object):
             'trn_augment_max_val': 0,
             'trn_batch_size': 44,
             'trn_optimizer': SGD,
-            'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': 1},
-            # 'trn_optimizer_args': {'lr': 0.001, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': 1},
+            # 'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': 1},
+            'trn_optimizer_args': {'lr': 0.001, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': 1},
             'trn_prop_trn': 0.9,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
@@ -132,7 +134,10 @@ class DenseNet121(object):
         self.cfg['pp_imgs_func'], self.cfg['pp_tags_func'] = ppif, pptf
 
         if model_json:
-            self.net = model_from_json(model_json)
+            pass
+            # fp = open(model_json, 'r')
+            # self.net = model_from_json(json.load(fp))
+            # fp.close()
 
         if weights_path:
             self.net.load_weights(weights_path)
@@ -218,12 +223,12 @@ class DenseNet121(object):
         across the entire batch and predictions averaged."""
 
         aug_funcs = [
-            lambda x: x,
-            lambda x: x[:, ::-1, ...],
-            lambda x: x[:, :, ::-1],
-            lambda x: np.rot90(x, 1, axes=(1, 2)),
-            lambda x: np.rot90(x, 2, axes=(1, 2)),
-            lambda x: np.rot90(x, 3, axes=(1, 2))
+            lambda x: x,                                          # identity
+            lambda x: x[:, ::-1, ...],                            # vlip
+            lambda x: x[:, :, ::-1],                              # hflip
+            lambda x: np.rot90(x, 1, axes=(1, 2)),                # +90
+            lambda x: np.rot90(x, 2, axes=(1, 2)),                # +180
+            lambda x: np.rot90(x, 3, axes=(1, 2))                 # +270
         ]
 
         imgs_batch = self.cfg['pp_imgs_func'](imgs_batch)
