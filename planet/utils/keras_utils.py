@@ -11,7 +11,7 @@ import numpy as np
 import os
 import pickle as pkl
 
-from planet.utils.data_utils import TAGS
+from planet.utils.data_utils import TAGS, optimize_thresholds, f2pr
 from planet.utils.runtime import funcname
 
 
@@ -159,7 +159,7 @@ class TensorBoardWrapper(TensorBoard):
 class ValidationCB(Callback):
     '''Compute validation metrics and save data to disk for visualizing/exploring.'''
 
-    def __init__(self, cpdir, batch_gen, batch_size, nb_steps, threshold=0.5):
+    def __init__(self, cpdir, batch_gen, batch_size, nb_steps):
         super(Callback, self).__init__()
         self.cpdir = cpdir
         self.batch_size = batch_size
@@ -167,7 +167,7 @@ class ValidationCB(Callback):
         self.nb_steps = nb_steps
         self.metrics = {'f2': [], 'prec': [], 'reca': []}
         self.tag_metrics = {t: {'f2': [], 'prec': [], 'reca': []} for t in TAGS}
-        self.threshold = threshold
+        self.best_thresholds = []
         assert os.path.exists(self.cpdir)
 
     def on_epoch_end(self, epoch, logs):
@@ -177,26 +177,25 @@ class ValidationCB(Callback):
         3. Store the metrics and predictions in a pickle file in the cpdir.
         '''
 
-        # Make predictions and store all true and predicted tags. Round predictions.
+        # Make predictions and store all true and predicted tags.
         yt = np.zeros((self.batch_size * self.nb_steps, len(TAGS)))
         yp = np.zeros((self.batch_size * self.nb_steps, len(TAGS)))
         for bidx in tqdm(range(self.nb_steps)):
             ib, tb = next(self.batch_gen)
             yt[bidx * self.batch_size:(bidx + 1) * self.batch_size] = tb
-            yp[bidx * self.batch_size:(bidx + 1) * self.batch_size] = self.model.predict(ib) > self.threshold
+            yp[bidx * self.batch_size:(bidx + 1) * self.batch_size] = self.model.predict(ib)
+
+        # Find the optimal thresholds
+        thresholds, f2, prec, reca = optimize_thresholds(yt, yp)
+        self.best_thresholds.append(thresholds)
 
         # Metrics per tag.
-        for tidx, tag in enumerate(TAGS):
-            self.tag_metrics[tag]['f2'].append(fbeta_score(yt[:, tidx], yp[:, tidx], beta=2.))
-            self.tag_metrics[tag]['prec'].append(precision_score(yt[:, tidx], yp[:, tidx]))
-            self.tag_metrics[tag]['reca'].append(recall_score(yt[:, tidx], yp[:, tidx]))
+        self.tag_metrics[tag]['f2'] += f2.tolist()
+        self.tag_metrics[tag]['prec'] += prec.tolist()
+        self.tag_metrics[tag]['reca'] += reca.tolist()
 
         # Mean metrics across all examples.
-        f2, prec, reca = 0., 0., 0.
-        for i in range(yt.shape[0]):
-            f2 += fbeta_score(yt[i], yp[i], beta=2.) / yt.shape[0]
-            prec += precision_score(yt[i], yp[i]) / yt.shape[0]
-            reca += recall_score(yt[i], yp[i]) / yt.shape[0]
+        f2, prec, reca = f2pr(yt, yp)
         self.metrics['f2'].append(f2)
         self.metrics['prec'].append(prec)
         self.metrics['reca'].append(reca)
@@ -211,6 +210,7 @@ class ValidationCB(Callback):
         for tag in TAGS:
             tm = self.tag_metrics[tag]
             logger.info('%-20s F2=%.5lf Prec=%.5lf Reca=%.5lf' % (tag, tm['f2'][-1], tm['prec'][-1], tm['reca'][-1]))
+        logger.info('Best thresholds: %s' % self.best_thresholds[-1])
 
         # # Save to disk.
         # payload = {'metrics': self.metrics, 'tag_metrics': self.tag_metrics, 'yt': yt, 'yp': yp}
