@@ -35,9 +35,9 @@ def make_hdf5(imgs_dir, img_shape, img_dtype, path_csv, path_hdf5):
     '''Make hdf5 file with 'images/[index]' datasets for each image and a single 'tags' dataset
     containing the array of binary tag arrays.'''
     df = pd.read_csv(path_csv)
+    N, _ = df.shape
     names, tagstrs = df['image_name'].values, df['tags'].values
     f = h5py.File(path_hdf5, 'w')
-    mean_img = np.zeros(img_shape)
     read_func = read_jpg if img_shape[-1] == 3 else read_tif
 
     # Set the image names as an attribute.
@@ -46,15 +46,30 @@ def make_hdf5(imgs_dir, img_shape, img_dtype, path_csv, path_hdf5):
     # Single dataset for all images.
     ds = f.create_dataset('images', (df.shape[0], *img_shape), dtype=img_dtype, chunks=(1, *img_shape))
 
-    for i, name in tqdm(enumerate(names)):
-        img = read_func('%s/%s' % (imgs_dir, name))
+    # Load the images into datasets. Track the channel means and standard deviations.
+    mean_img = np.zeros(img_shape, dtype=np.float32)
+    for i in tqdm(range(N)):
+        img = read_func('%s/%s' % (imgs_dir, names[i]))
         ds[i, :, :, :] = img
-        mean_img += ds[i, :, :, :] / df.shape[0]
+        mean_img += img / N
         assert np.all(ds[i, :, :, :] == img)
 
+    # Compute, print mean at each channel.
+    channel_means = np.mean(mean_img, axis=(0, 1))
     print('Channel means:')
     for c in range(img_shape[-1]):
-        print('Ch %d: %.8lf' % (c, np.mean(mean_img[:, :, c])))
+        print('Channel %d: %.8lf' % (c, channel_means[c]))
+
+    # Compute, print standard deviation at each channel.
+    channel_errors = np.zeros(channel_means.shape, dtype=np.float64)
+    for i in tqdm(range(N)):
+        img = ds[i, :, :, :]
+        channel_errors += (np.mean(img, axis=(0, 1)) - channel_means) ** 2
+    channel_stdvs = np.sqrt(channel_errors / N)
+
+    print('Channel stdvs:')
+    for c in range(img_shape[-1]):
+        print('Channel %d: %.8lf' % (c, channel_stdvs[c]))
 
     tags = np.zeros((df.shape[0], len(TAGS)), dtype=np.int8)
     for i, tagstr in enumerate(tagstrs):
@@ -65,6 +80,7 @@ def make_hdf5(imgs_dir, img_shape, img_dtype, path_csv, path_hdf5):
     f.close()
 
     # Test the read speed.
+    print('Testing read speed:')
     f = h5py.File(path_hdf5, 'r')
     imgs = f.get('images')
     for i, name in tqdm(enumerate(names)):
@@ -77,8 +93,8 @@ if not os.path.exists('data/train-jpg.hdf5'):
 if not os.path.exists('data/test-jpg.hdf5'):
     make_hdf5('data/test-jpg', (256, 256, 3), 'uint8', 'data/sample_submission_v2.csv', 'data/test-jpg.hdf5')
 
-if not os.path.exists('data/train-tif.hdf5'):
-    make_hdf5('data/train-tif-v2', (256, 256, 4), 'uint16', 'data/train_v2.csv', 'data/train-tif.hdf5')
+# if not os.path.exists('data/train-tif.hdf5'):
+#     make_hdf5('data/train-tif-v2', (256, 256, 4), 'uint16', 'data/train_v2.csv', 'data/train-tif.hdf5')
 
-if not os.path.exists('data/test-tif.hdf5'):
-    make_hdf5('data/test-tif-v2', (256, 256, 4), 'uint16', 'data/sample_submission_v2.csv', 'data/test-tif.hdf5')
+# if not os.path.exists('data/test-tif.hdf5'):
+#     make_hdf5('data/test-tif-v2', (256, 256, 4), 'uint16', 'data/sample_submission_v2.csv', 'data/test-tif.hdf5')
