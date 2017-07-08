@@ -276,7 +276,7 @@ def val_plot_predictions(pickle_path):
 
 # Given a matrix of yt and yp, where each row is a separate prediction and each column
 # is a separate label, this returns a vector of F2 scores, one for each label
-def f2pr(yt, yp, thresholds):
+def tags_f2pr(yt, yp, thresholds):
     yp = (yp > thresholds).astype(np.uint8)
 
     tp = np.sum(yt * yp, axis=0)
@@ -289,14 +289,14 @@ def f2pr(yt, yp, thresholds):
     return (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7)), p, r
 
 
-def optimize_thresholds(yt, yp, n=101, metric=F2):
+def optimize_thresholds(yt, yp, n=101):
     best_f2 = np.zeros(yp.shape[1])
     best_thresholds = np.zeros(yp.shape[1])
     thresholds = np.zeros(yp.shape[1])
 
     for t in np.linspace(0,1,n):
         thresholds.fill(t)
-        f2,_,_ = F2(yt, yp, thresholds)
+        f2,_,_ = tags_f2pr(yt, yp, thresholds)
 
         # update the best thresholds for the ones that got better
         np.putmask(best_thresholds, f2 > best_f2, thresholds)
