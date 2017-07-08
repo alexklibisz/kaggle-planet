@@ -270,26 +270,12 @@ def val_plot_predictions(pickle_path):
     plt.show()
     return
 
-
-def f2pr(yt, yp, thresholds):
-    yp = (yp > thresholds).astype(np.uint8)
-
-    tp = np.sum(yt * yp, axis=0)
-    fp = np.sum(np.clip(yp - yt, 0, 1), axis=0)
-    fn = np.sum(np.clip(yt - yp, 0, 1), axis=0)
-
-    p = tp / (tp + fp + 1e-7)
-    r = tp / (tp + fn + 1e-7)
-    b = 2.0
-    f2 = (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7))
-    return f2, p, r
-
-
 # Given a matrix of yt and yp, where each row is a separate prediction and each column
 # is for a separate tag, this returns F2 scores, recall, and precision for each tag
 # using the given thresholds
 def tags_f2pr(yt, yp, thresholds):
     yp = (yp > thresholds).astype(np.uint8)
+    # get f2pr collapsing along rows axis
     return f2pr(yt, yp, axis=0)
 
 # Given a matrix of yt and yp, where each row is a separate prediction and each column
@@ -298,6 +284,7 @@ def tags_f2pr(yt, yp, thresholds):
 def _tags_f2pr(yt, yp, thresholds_to_try):
     yp = (yp > thresholds_to_try[:,None,None]).astype(np.uint8)
     yt = yt[None,:,:]
+    # get f2pr collapsing along rows axis
     return f2pr(yt, yp, axis=1)
 
 # Given a matrix of yt and yp, where each row is a separate prediction and each column
@@ -308,8 +295,8 @@ def f2pr(yt, yp, axis=None):
     fp = np.sum(np.clip(yp - yt, 0, 1), axis=axis)
     fn = np.sum(np.clip(yt - yp, 0, 1), axis=axis)
 
-    # p = tp/(tp + fp + 1e-1)
-    # r = tp/(tp + fn + 1e-1)
+    # p = tp/(tp + fp + 1e-7)
+    # r = tp/(tp + fn + 1e-7)
 
     p = np.divide(tp, (np.add(np.add(tp,fp,dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
     r = np.divide(tp, (np.add(np.add(tp,fn,dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
@@ -319,8 +306,8 @@ def f2pr(yt, yp, axis=None):
 
 def optimize_thresholds(yt, yp, n=101):
     thresholds_to_try = np.linspace(0,1,n)
-    f2,_,_ = _tags_f2pr(yt, yp, thresholds_to_try)
+    f2,r,p = _tags_f2pr(yt, yp, thresholds_to_try)
 
     # Find the thresholds that gave the highest f2 score
     best_indices = np.argmax(f2,axis=0)
-    return thresholds_to_try[best_indices]
+    return thresholds_to_try[best_indices], f2[best_indices], r[best_indices], p[best_indices]
