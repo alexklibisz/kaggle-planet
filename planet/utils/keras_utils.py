@@ -186,13 +186,15 @@ class ValidationCB(Callback):
             yp[bidx * self.batch_size:(bidx + 1) * self.batch_size] = self.model.predict(ib)
 
         # Find the optimal thresholds
-        thresholds, f2, prec, reca = optimize_thresholds(yt, yp)
+        thresholds = optimize_thresholds(yt, yp)
         self.best_thresholds.append(thresholds)
+        yp = (yp > thresholds).astype(np.uint8)
 
         # Metrics per tag.
-        self.tag_metrics[tag]['f2'] += f2.tolist()
-        self.tag_metrics[tag]['prec'] += prec.tolist()
-        self.tag_metrics[tag]['reca'] += reca.tolist()
+        for tidx, tag in enumerate(TAGS):
+            self.tag_metrics[tag]['f2'].append(fbeta_score(yt[:, tidx], yp[:, tidx], beta=2.))
+            self.tag_metrics[tag]['prec'].append(precision_score(yt[:, tidx], yp[:, tidx]))
+            self.tag_metrics[tag]['reca'].append(recall_score(yt[:, tidx], yp[:, tidx]))
 
         # Mean metrics across all examples.
         f2, prec, reca = f2pr(yt, yp)

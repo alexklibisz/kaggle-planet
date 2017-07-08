@@ -76,22 +76,18 @@ def correct_tags(tags):
     return tags
 
 
-def get_train_val_idxs(hdf5_path, prop_data=1.0, prop_trn=0.8, rng=None, nb_iter=2000):
+def get_train_val_idxs(tags, prop_data=1.0, prop_trn=0.8, rng=None, nb_iter=2000):
     '''Picks the random training and validation indexes from the given array of tags
     that minimizes the mean absolute error relative the full dataset.'''
     if rng is None:
         rng = np.random
-
-    f = h5py.File(hdf5_path, 'r')
-    tags = f.get('tags')[...].astype(np.float32)
-    f.close()
 
     dist_full = np.sum(tags, axis=0) / len(tags)
     best, min_mae = None, 1e10
     idxs = np.arange(tags.shape[0])
     nbtrn = int(tags.shape[0] * prop_data * prop_trn)
     nbval = int(tags.shape[0] * prop_data * (1 - prop_trn))
-    for _ in range(nb_iter):
+    for _ in tqdm(range(nb_iter)):
         rng.shuffle(idxs)
         idxs_trn, idxs_val = idxs[:nbtrn], idxs[-nbval:]
         assert set(idxs_trn).intersection(idxs_val) == set([])
@@ -303,8 +299,8 @@ def f2pr(yt, yp, axis=None):
     # p = tp/(tp + fp + 1e-7)
     # r = tp/(tp + fn + 1e-7)
 
-    p = np.divide(tp, (np.add(np.add(tp, fp, dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
-    r = np.divide(tp, (np.add(np.add(tp, fn, dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
+    p = np.divide(tp, (np.add(np.add(tp, fp, dtype=np.float32), 1e-7, dtype=np.float32)), dtype=np.float32)
+    r = np.divide(tp, (np.add(np.add(tp, fn, dtype=np.float32), 1e-7, dtype=np.float32)), dtype=np.float32)
     b = 2.0
     f2 = (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7))
     return f2, p, r
