@@ -286,17 +286,23 @@ def f2pr(yt, yp, thresholds):
 
 
 # Given a matrix of yt and yp, where each row is a separate prediction and each column
-# is a separate label, this returns a vector of F2 scores, one for each label
+# is for a separate tag, this returns F2 scores, recall, and precision for each tag
+# using the given thresholds
 def tags_f2pr(yt, yp, thresholds):
     yp = (yp > thresholds).astype(np.uint8)
     return f2pr(yt, yp, axis=0)
 
+# Given a matrix of yt and yp, where each row is a separate prediction and each column
+# is for a separate tag, this returns a F2 scores, recall, and precision for each tag
+# for each threshold in the thresholds_to_try array
 def _tags_f2pr(yt, yp, thresholds_to_try):
     yp = (yp > thresholds_to_try[:,None,None]).astype(np.uint8)
     yt = yt[None,:,:]
     return f2pr(yt, yp, axis=1)
 
-# Note: this doesn't use the thresholds
+# Given a matrix of yt and yp, where each row is a separate prediction and each column
+# is a separate label, this returns  F2 scores, one for each label
+# Note: this assumes you've already taken care of the thresholding for yp
 def f2pr(yt, yp, axis=None):
     tp = np.sum(yt * yp, axis=axis)
     fp = np.sum(np.clip(yp - yt, 0, 1), axis=axis)
@@ -311,9 +317,10 @@ def f2pr(yt, yp, axis=None):
     f2 = (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7))
     return f2, p, r
 
-def optimize_thresholds(yt, yp, n=101):
+def optimize_thresholds(yt, yp, n=1001):
     thresholds_to_try = np.linspace(0,1,n)
     f2,_,_ = _tags_f2pr(yt, yp, thresholds_to_try)
 
+    # Find the thresholds that gave the highest f2 score
     best_indices = np.argmax(f2,axis=0)
     return thresholds_to_try[best_indices]
