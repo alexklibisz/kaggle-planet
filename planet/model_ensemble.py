@@ -18,15 +18,17 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
     yp_tst_fnames = df['yp_test_fname']
 
     yp_trn = np.zeros((40479, len(TAGS)))
-    for cp_path, yp_path in zip(cp_paths, yp_trn_fnames):
-        yp_path = yp_path.strip()
-        yp = np.load('%s/%s' % (cp_path, yp_path))
+    for cp_path, yp_fname in zip(cp_paths, yp_trn_fnames):
+        cp_path = os.path.expanduser(cp_path)
+        yp_fname = yp_fname.strip()
+        yp = np.load('%s/%s' % (cp_path, yp_fname))
         yp_trn += yp/len(yp_trn_fnames)
 
     yp_tst = np.zeros((61191, len(TAGS)))
-    for cp_path, yp_path in zip(cp_paths, yp_tst_fnames):
-        yp_path = yp_path.strip()
-        yp = np.load('%s/%s' % (cp_path, yp_path))
+    for cp_path, yp_fname in zip(cp_paths, yp_tst_fnames):
+        cp_path = os.path.expanduser(cp_path)
+        yp_fname = yp_fname.strip()
+        yp = np.load('%s/%s' % (cp_path, yp_fname))
         yp_tst += yp/len(yp_tst_fnames)
 
     # Get yt values from trn hdf5 file
