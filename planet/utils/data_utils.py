@@ -269,3 +269,32 @@ def val_plot_predictions(pickle_path):
         ax.set_xticklabels(TAGS_short)
     plt.show()
     return
+
+# Given a matrix of yt and yp, where each row is a separate prediction and each column
+# is a separate label, this returns a vector of F2 scores, one for each label
+def F2(yt, yp, thresholds):
+    yp = (yp > thresholds).astype(np.uint8)
+
+    tp = np.sum(yt * yp, axis=0)
+    fp = np.sum(np.clip(yp - yt, 0, 1), axis=0)
+    fn = np.sum(np.clip(yt - yp, 0, 1), axis=0)
+
+    p = tp / (tp + fp + 1e-7)
+    r = tp / (tp + fn + 1e-7)
+    b = 2.0
+    return (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7))
+def optimize_thresholds(yt, yp, n=101, metric=F2):
+    best_f2 = np.zeros(yp.shape[1])
+    best_thresholds = np.zeros(yp.shape[1])
+    thresholds = np.zeros(yp.shape[1])
+
+    for t in np.linspace(0,1,n):
+        thresholds.fill(t)
+        f2 = F2(yt, yp, thresholds)
+
+        # update the best thresholds for the ones that got better
+        np.putmask(best_thresholds, f2 > best_f2, thresholds)
+        np.putmask(best_f2, f2 > best_f2, f2)
+
+    return best_thresholds
+
