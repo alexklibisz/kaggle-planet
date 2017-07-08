@@ -317,7 +317,7 @@ def f2pr(yt, yp, axis=None):
     f2 = (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7))
     return f2, p, r
 
-def optimize_thresholds(yt, yp, n=1001):
+def optimize_thresholds(yt, yp, n=101):
     thresholds_to_try = np.linspace(0,1,n)
     f2,_,_ = _tags_f2pr(yt, yp, thresholds_to_try)
 
