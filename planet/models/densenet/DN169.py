@@ -97,6 +97,7 @@ def densenet169_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth
     model = Model(img_input, x_fc, name='densenet')
 
     if pretrained:
+        print('Loading Imagenet weights.')
         model.load_weights('data/weights/densenet169_weights_tf.h5', by_name=True)
 
     # if K.image_dim_ordering() == 'th':
