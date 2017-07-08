@@ -14,10 +14,9 @@ from sklearn.metrics import log_loss
 # from custom_layers.scale_layer import Scale
 from planet.models.densenet.scale_layer import Scale
 
-from load_cifar10 import load_cifar10_data
 
-
-def densenet169_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth_rate=32, nb_filter=64, reduction=0.5, dropout_rate=0.0, weight_decay=1e-4, num_classes=None):
+def densenet169_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth_rate=32, nb_filter=64, reduction=0.5,
+                      dropout_rate=0.0, weight_decay=1e-4, num_classes=None, pretrained=False):
     '''
     DenseNet 169 Model for Keras
 
@@ -49,10 +48,10 @@ def densenet169_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth
     global concat_axis
     if K.image_dim_ordering() == 'tf':
         concat_axis = 3
-        img_input = Input(shape=(224, 224, 3), name='data')
+        img_input = Input(shape=(img_rows, img_cols, color_type), name='data')
     else:
         concat_axis = 1
-        img_input = Input(shape=(3, 224, 224), name='data')
+        img_input = Input(shape=(color_type, img_rows, img_cols), name='data')
 
     # From architecture for ImageNet (Table 1 in the paper)
     nb_filter = 64
@@ -91,6 +90,9 @@ def densenet169_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth
     x_fc = Activation('softmax', name='prob')(x_fc)
 
     model = Model(img_input, x_fc, name='densenet')
+
+    if pretrained:
+        model.load_weights('data/weights/densenet169_weights_tf.h5', by_name=True)
 
     # if K.image_dim_ordering() == 'th':
     #     # Use pre-trained weights for Theano backend
