@@ -158,7 +158,6 @@ class Godard(object):
             else:
                 return 1e-5
 
-
         cb = [
             ValidationCB(self.cfg['cpdir'], gen_val, self.cfg['trn_batch_size'], steps_val),
             HistoryPlotCB('%s/history.png' % self.cpdir),
@@ -166,7 +165,7 @@ class Godard(object):
             # EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
             ModelCheckpoint('%s/wvalf2_{epoch:02d}_{val_F2:.3f}.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
-                            save_best_only=False, mode='max'),
+                            save_best_only=True, mode='max'),
             LearningRateScheduler(lrsched)
             # ReduceLROnPlateau(monitor='F2', factor=0.1, patience=5,
             #                   min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max')
