@@ -47,9 +47,9 @@ def _densenet121(input_shape=(224, 224, 3), pretrained=False):
     from planet.utils.multi_gpu import make_parallel
 
     def preprocess_zc(x):
-        R = x[:, :, :, 0:1] - IMG_MEAN_JPG_TRN[0] / IMG_STDV_JPG_TRN[0]
-        G = x[:, :, :, 1:2] - IMG_MEAN_JPG_TRN[1] / IMG_STDV_JPG_TRN[1]
-        B = x[:, :, :, 2:3] - IMG_MEAN_JPG_TRN[2] / IMG_STDV_JPG_TRN[2]
+        R = (x[:, :, :, 0:1] - IMG_MEAN_JPG_TRN[0]) / IMG_STDV_JPG_TRN[0]
+        G = (x[:, :, :, 1:2] - IMG_MEAN_JPG_TRN[1]) / IMG_STDV_JPG_TRN[1]
+        B = (x[:, :, :, 2:3] - IMG_MEAN_JPG_TRN[2]) / IMG_STDV_JPG_TRN[2]
         return K.concatenate([R, G, B], axis=-1)
 
     # preprocess = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')
