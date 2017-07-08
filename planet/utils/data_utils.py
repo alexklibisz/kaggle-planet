@@ -310,4 +310,4 @@ def optimize_thresholds(yt, yp, n=101):
 
     # Find the thresholds that gave the highest f2 score
     best_indices = np.argmax(f2,axis=0)
-    return thresholds_to_try[best_indices], f2[best_indices], r[best_indices], p[best_indices]
+    return thresholds_to_try[best_indices]
