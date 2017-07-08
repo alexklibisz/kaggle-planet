@@ -271,12 +271,7 @@ def val_plot_predictions(pickle_path):
     return
 
 
-
-
-
-# Given a matrix of yt and yp, where each row is a separate prediction and each column
-# is a separate label, this returns a vector of F2 scores, one for each label
-def tags_f2pr(yt, yp, thresholds):
+def f2pr(yt, yp, thresholds):
     yp = (yp > thresholds).astype(np.uint8)
 
     tp = np.sum(yt * yp, axis=0)
@@ -286,21 +281,39 @@ def tags_f2pr(yt, yp, thresholds):
     p = tp / (tp + fp + 1e-7)
     r = tp / (tp + fn + 1e-7)
     b = 2.0
-    return (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7)), p, r
+    f2 = (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7))
+    return f2, p, r
 
+
+# Given a matrix of yt and yp, where each row is a separate prediction and each column
+# is a separate label, this returns a vector of F2 scores, one for each label
+def tags_f2pr(yt, yp, thresholds):
+    yp = (yp > thresholds).astype(np.uint8)
+    return f2pr(yt, yp, axis=0)
+
+def _tags_f2pr(yt, yp, thresholds_to_try):
+    yp = (yp > thresholds_to_try[:,None,None]).astype(np.uint8)
+    yt = yt[None,:,:]
+    return f2pr(yt, yp, axis=1)
+
+# Note: this doesn't use the thresholds
+def f2pr(yt, yp, axis=None):
+    tp = np.sum(yt * yp, axis=axis)
+    fp = np.sum(np.clip(yp - yt, 0, 1), axis=axis)
+    fn = np.sum(np.clip(yt - yp, 0, 1), axis=axis)
+
+    # p = tp/(tp + fp + 1e-1)
+    # r = tp/(tp + fn + 1e-1)
+
+    p = np.divide(tp, (np.add(np.add(tp,fp,dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
+    r = np.divide(tp, (np.add(np.add(tp,fn,dtype=np.int32), 1e-7, dtype=np.float32)), dtype=np.float32)
+    b = 2.0
+    f2 = (1 + b**2) * ((p * r) / (b**2 * p + r + 1e-7))
+    return f2, p, r
 
 def optimize_thresholds(yt, yp, n=101):
-    best_f2 = np.zeros(yp.shape[1])
-    best_thresholds = np.zeros(yp.shape[1])
-    thresholds = np.zeros(yp.shape[1])
+    thresholds_to_try = np.linspace(0,1,n)
+    f2,_,_ = _tags_f2pr(yt, yp, thresholds_to_try)
 
-    for t in np.linspace(0,1,n):
-        thresholds.fill(t)
-        f2,_,_ = tags_f2pr(yt, yp, thresholds)
-
-        # update the best thresholds for the ones that got better
-        np.putmask(best_thresholds, f2 > best_f2, thresholds)
-        np.putmask(best_f2, f2 > best_f2, f2)
-
-    return best_thresholds
-
+    best_indices = np.argmax(f2,axis=0)
+    return thresholds_to_try[best_indices]
