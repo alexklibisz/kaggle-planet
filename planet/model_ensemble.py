@@ -80,7 +80,7 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
     for it in tqdm(range(N_trn)):
         w[it] = 1
         f2_opt, thresh_opt, w = get_answers(yt_trn, yp_trn_all, w)
-        print('%s: f2 = %f' % (paths_yp_trn, f2_opt))
+        print('%s: f2 = %f' % (paths_yp_trn[it], f2_opt))
         w[it] = 0
         if f2_opt > 0.88:
             top_stuff.append((f2_opt, thresh_opt, w))
@@ -123,8 +123,10 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
         yp_tst = weighted_yp(w, yp_tst_all)
 
         yp_tst_opt = (yp_tst > thresh_opt).astype(np.uint8)
-        csv_path = '%s/submission_tst_opt_%d_%.6f_%02d.csv' % (cpdir, t, f2, idx)
-        submission(names_tst, yp_tst_opt, csv_path)
+        stem = '%s/submission_tst_opt_%d_%.6f_%02d' % (cpdir, t, f2, idx)
+
+        np.savez('%s.npz'%stem, weights=w, thresholds=thresh_opt)
+        submission(names_tst, yp_tst_opt, '%s.csv' % stem)
 
         # Save raw activations.
         # np_path = '%s/yp_tst_%d.npy' % (cpdir, t)
