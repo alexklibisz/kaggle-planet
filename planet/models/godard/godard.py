@@ -114,7 +114,7 @@ class Godard(object):
             self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
 
         if weights_path:
-            self.net.load_weights(weights_path, by_name=True)
+            self.net.load_weights(weights_path)
 
     @property
     def cpdir(self):
