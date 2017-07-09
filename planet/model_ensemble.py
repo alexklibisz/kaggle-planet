@@ -5,6 +5,8 @@ import os
 import numpy as np
 import pandas as pd
 import sys
+from itertools import permutations
+from operator import itemgetter
 from time import time
 from tqdm import tqdm
 sys.path.append('.')
@@ -16,7 +18,7 @@ NUM_IMAGES_TRN = 40479
 NUM_IMAGES_TST = 61191
 NUM_OUTPUTS = len(TAGS)
 
-def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_path_tst='data/test-jpg.hdf5', nb_iter=5):
+def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_path_tst='data/test-jpg.hdf5', nb_iter=2000):
     logger = logging.getLogger(funcname())
 
     # Read spreadsheet values to get prediction paths.
@@ -70,7 +72,22 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
     w = np.ones((N_trn, NUM_OUTPUTS), dtype=np.float16)
     f2_opt, thresh_opt, w = get_answers(yt_trn, yp_trn_all, w)
     top_stuff.append((f2_opt, thresh_opt, w))
-    logger.info('Equal weights: f2 = %lf: %s' % (f2_opt, w))
+    logger.info('Equal weights: f2 = %f: %s' % (f2_opt, w))
+
+    # Try using each member individually
+    w = np.zeros((N_trn, NUM_OUTPUTS), dtype=np.float16)
+    ones_idxs = [0]*NUM_OUTPUTS
+    for it in tqdm(range(N_trn)):
+        w[it] = 1
+        f2_opt, thresh_opt, w = get_answers(yt_trn, yp_trn_all, w)
+        print('%s: f2 = %f' % (paths_yp_trn, f2_opt))
+        w[it] = 0
+        if f2_opt > 0.88:
+            top_stuff.append((f2_opt, thresh_opt, w))
+            if f2_opt > top_stuff[best_idx][0]:
+                old_best = top_stuff[best_idx][0]
+                best_idx = len(top_stuff)-1
+                logger.info('   f2 improved from %lf to %lf' % (it, old_best, f2_opt))
 
     # Randomly choose a weight for each tag across all member predictions.
     # The weights for each tag sum to 1.
@@ -90,7 +107,7 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
     names_tst = data_tst.attrs['names'].split(',')
 
     # Make submissions with best 10 stuff
-    top_stuff.sort()
+    top_stuff.sort(key=itemgetter(0))
     top_stuff = top_stuff[:10]
     t = time()
 
@@ -98,6 +115,7 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
     cpdir = 'checkpoints/ensemble_%d' % (int(time()))
     if not os.path.exists(cpdir):
         os.mkdir(cpdir)
+
     for idx, (f2, thresh_opt, w) in enumerate(top_stuff):
         logger.info('Making submission with f2 = %lf: %s' % (f2, w))
 
