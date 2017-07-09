@@ -47,9 +47,9 @@ def _densenet121(input_shape=(224, 224, 3), pretrained=False):
     from planet.utils.multi_gpu import make_parallel
 
     def preprocess_zc(x):
-        R = (x[:, :, :, 0:1] - IMG_MEAN_JPG_TRN[0]) / IMG_STDV_JPG_TRN[0]
-        G = (x[:, :, :, 1:2] - IMG_MEAN_JPG_TRN[1]) / IMG_STDV_JPG_TRN[1]
-        B = (x[:, :, :, 2:3] - IMG_MEAN_JPG_TRN[2]) / IMG_STDV_JPG_TRN[2]
+        R = (x[:, :, :, 0:1] - 79.416386338) / 38.78731346
+        G = (x[:, :, :, 1:2] - 86.838409053) / 33.77907741
+        B = (x[:, :, :, 2:3] - 76.201647143) / 32.63850828
         return K.concatenate([R, G, B], axis=-1)
 
     # preprocess = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')
@@ -70,9 +70,9 @@ def _densenet169(input_shape=(224, 224, 3), pretrained=False):
     from planet.utils.multi_gpu import make_parallel
 
     def preprocess_zc(x):
-        R = x[:, :, :, 0:1] - IMG_MEAN_JPG_TRN[0] / IMG_STDV_JPG_TRN[0]
-        G = x[:, :, :, 1:2] - IMG_MEAN_JPG_TRN[1] / IMG_STDV_JPG_TRN[1]
-        B = x[:, :, :, 2:3] - IMG_MEAN_JPG_TRN[2] / IMG_STDV_JPG_TRN[2]
+        R = (x[:, :, :, 0:1] - 79.416386338) / 38.78731346
+        G = (x[:, :, :, 1:2] - 86.838409053) / 33.77907741
+        B = (x[:, :, :, 2:3] - 76.201647143) / 32.63850828
         return K.concatenate([R, G, B], axis=-1)
 
     # preprocess = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')
@@ -126,7 +126,7 @@ class DenseNet121(object):
             'trn_epochs': 100,
             'trn_augment_max_trn': 5,
             'trn_augment_max_val': 0,
-            'trn_batch_size': 32,
+            'trn_batch_size': 44,
             'trn_prop_trn': 0.9,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
@@ -222,46 +222,8 @@ class DenseNet121(object):
                 yield ib, tb
 
     def predict_batch(self, imgs_batch):
-        """Predict a single batch of images with augmentation. Augmentations vectorized
-        across the entire batch and predictions averaged."""
-
-        aug_funcs = [
-            lambda x: x,                                          # identity
-            lambda x: x[:, ::-1, ...],                            # vlip
-            lambda x: x[:, :, ::-1],                              # hflip
-            lambda x: np.rot90(x, 1, axes=(1, 2)),                # +90
-            lambda x: np.rot90(x, 2, axes=(1, 2)),                # +180
-            lambda x: np.rot90(x, 3, axes=(1, 2)),                # +270
-            lambda x: np.rot90(x, 1, axes=(1, 2))[:, ::-1, ...],  # vflip(+90)
-            lambda x: np.rot90(x, 1, axes=(1, 2))[:, :, ::-1]     # vflip(+90)
-        ]
-
-        yp = np.zeros((imgs_batch.shape[0], len(TAGS)))
-        for aug_func in aug_funcs:
-            imgs_batch = aug_func(imgs_batch)
-            tags_batch = self.net.predict(imgs_batch)
-            yp += tags_batch / len(aug_funcs)
-
-        return yp
-
-    def predict(self, dataset):
-
-        path = self.cfg['hdf5_path_trn'] if dataset == 'train' else self.cfg['hdf5_path_tst']
-        data = h5py.File(path)
-        yt = data.get('tags')[...]
-        yp = np.zeros(yt.shape, dtype=np.float32)
-        imgs = data.get('images')
-        names = data.attrs['names'].split(',')
-        imgs_batch = np.zeros((self.cfg['tst_batch_size'], *self.cfg['input_shape']), dtype=np.float32)
-
-        for didx in tqdm(range(0, len(imgs), self.cfg['tst_batch_size'])):
-            bsz = min(self.cfg['tst_batch_size'], len(imgs) - didx)
-            for bidx in range(bsz):
-                imgs_batch[bidx] = imresize(imgs[didx + bidx, ...], self.cfg['input_shape'])
-            yp[didx:didx + bsz] = self.predict_batch(imgs_batch[:bsz])
-
-        return names, yt, yp
-
+        """Predict a single batch of images."""
+        return self.net.predict(imgs_batch)
 
 if __name__ == "__main__":
     from planet.model_runner import model_runner

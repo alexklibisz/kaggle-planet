@@ -6,18 +6,21 @@ import numpy as np
 import os
 import pandas as pd
 import tensorflow as tf
+from scipy.misc import imresize
 from time import time
+from tqdm import tqdm
 import sys
 sys.path.append('.')
 from planet.utils.data_utils import optimize_thresholds, tags_f2pr, f2pr, TAGS, binary_to_tagstr
 from planet.utils.runtime import funcname
 
 np.random.seed(int(time()) + os.getpid())
-tf.set_random_seed(1+int(time()) + os.getpid())
+tf.set_random_seed(1 + int(time()) + os.getpid())
 
 # Overwrite the random seed
 np.random.seed(317)
 tf.set_random_seed(318)
+
 
 def train(model_class, args):
 
@@ -40,9 +43,8 @@ def submission(names, yp, csv_path):
 
 
 def predict(model_class, args):
-    """Uses the given model to make predictions, convert them into strings, and save
-    them to a CSV file. Uses the training data to pick the best threshold for each 
-    output activation. Saves both the optimized and regular thresholds."""
+    """Instantiates the model and makes augmented predictions. Serializes the predictions
+    as numpy matrices."""
 
     logger = logging.getLogger(funcname())
 
@@ -51,63 +53,69 @@ def predict(model_class, args):
         args['json'] = json.load(fp)
         fp.close()
 
-    # Predictions for training data.
+    # Setup model.
     model = model_class(args['json'], args['weights'])
     model.cfg['cpdir'] = '/'.join(args['weights'].split('/')[:-1])
-    names_trn, yt_trn, yp_trn = model.predict('train')
-    names_tst, _, yp_tst = model.predict('test')
+    assert 'hdf5_path_trn' in model.cfg
+    assert 'hdf5_path_tst' in model.cfg
+    assert 'tst_batch_size' in model.cfg
 
-    optimize_submit(model.cpdir, names_trn, names_tst, yt_trn, yp_trn, yp_tst)
+    # Load data.
+    data_trn = h5py.File(model.cfg['hdf5_path_trn'], 'r')
+    data_tst = h5py.File(model.cfg['hdf5_path_tst'], 'r')
+    imgs_trn, tags_trn = data_trn.get('images'), data_trn.get('tags')
+    imgs_tst, tags_tst = data_tst.get('images'), data_tst.get('tags')
 
-def optimize_submit(cpdir, names_trn, names_tst, yt_trn, yp_trn, yp_tst):
-    logger = logging.getLogger(funcname())
+    # Make training and testing predictions batch-by-batch for multiple
+    # augmentations. Serialize the complete matrix of activations for each
+    # augmentation separately.
+    aug_funcs = [
+        ('identity', lambda x: x),
+        ('vflip', lambda x: x[:, ::-1, ...]),
+        ('hflip', lambda x: x[:, :, ::-1]),
+        ('rot90', lambda x: np.rot90(x, 1, axes=(1, 2))),
+        ('rot180', lambda x: np.rot90(x, 2, axes=(1, 2))),
+        ('rot270', lambda x: np.rot90(x, 3, axes=(1, 2))),
+        ('rot90vflip', lambda x: np.rot90(x, 1, axes=(1, 2))[:, ::-1, ...]),
+        ('rot90hflip', lambda x: np.rot90(x, 1, axes=(1, 2))[:, :, ::-1])
+    ]
 
-    # Compute thresholds for each tag.
-    logger.info('Optimizing thresholds')
-    thresh_def = np.ones(len(TAGS)) * 0.5
-    thresh_opt = optimize_thresholds(yt_trn, yp_trn)
-    logger.info('Optimized thresholds: %s' % str(thresh_opt))
+    for aug_name, aug_func in aug_funcs:
 
-    yp_trn_def = (yp_trn > thresh_def).astype(np.uint8)
-    yp_trn_opt = (yp_trn > thresh_opt).astype(np.uint8)
-    f2t_def, pt_def, rt_def = tags_f2pr(yt_trn, yp_trn_def, thresh_def)
-    f2t_opt, pt_opt, rt_opt = tags_f2pr(yt_trn, yp_trn_opt, thresh_opt)
+        # Train set.
+        logger.info('Augmentation %s.' % (aug_name))
+        yp = np.zeros(tags_trn.shape, dtype=np.float32)
+        imgs_batch = np.zeros((model.cfg['tst_batch_size'], *model.net.input_shape[1:]))
+        for i0 in tqdm(range(0, imgs_trn.shape[0], model.cfg['tst_batch_size'])):
+            i1 = i0 + min(model.cfg['tst_batch_size'], imgs_trn.shape[0] - i0)
+            for i in range(i1 - i0):
+                imgs_batch[i] = imresize(imgs_trn[i, :, :, :], model.net.input_shape[1:])
+            yp[i0:i1] = model.predict_batch(aug_func(imgs_batch[:i1 - i0]))
 
-    # Print metrics for each tag.
-    for i, t in enumerate(TAGS):
-        logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf t=%.3lf' % (t, f2t_def[i], pt_def[i], rt_def[i], thresh_def[i]))
-        logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf t=%.3lf' % (t, f2t_opt[i], pt_opt[i], rt_opt[i], thresh_opt[i]))
+        # Optimize activation thresholds and print F2 as a sanity check.
+        yt = tags_trn[...]
+        thresh_opt = optimize_thresholds(yt, yp)
+        f2, p, r = f2pr(yt, (yp > thresh_opt).astype(np.uint8))
+        logger.info('Optimized f2=%.4lf, p=%.4lf, r=%.4lf' % (f2, p, r))
 
-    # Print aggregate metrics.
-    f2_def, p_def, r_def = f2pr(yt_trn, yp_trn_def)
-    f2_opt, p_opt, r_opt = f2pr(yt_trn, yp_trn_opt)
-    logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf' % ('Def. aggregate', f2_def, p_def, r_def))
-    logger.info('%-20s f2=%.3lf p=%.3lf r=%.3lf' % ('Opt. aggregate', f2_opt, p_opt, r_opt))
+        # Save raw activations.
+        npy_path = '%s/yp_trn_%s.npy' % (model.cpdir, aug_name)
+        np.save(npy_path, yp)
+        logger.info('Saved %s.' % npy_path)
 
-    # Save submissions for training and testing with and without optimization.
-    t = int(time())
-    csv_path = '%s/submission_trn_def_%d.csv' % (cpdir, t)
-    submission(names_trn, yp_trn_def, csv_path)
+        # Test set.
+        yp = np.zeros(tags_tst.shape, dtype=np.float32)
+        imgs_batch = np.zeros((model.cfg['tst_batch_size'], *model.net.input_shape[1:]))
+        for i0 in tqdm(range(0, imgs_tst.shape[0], model.cfg['tst_batch_size'])):
+            i1 = i0 + min(model.cfg['tst_batch_size'], imgs_tst.shape[0] - i0)
+            for i in range(i1 - i0):
+                imgs_batch[i] = imresize(imgs_tst[i, :, :, :], model.net.input_shape[1:])
+            yp[i0:i1] = model.predict_batch(aug_func(imgs_batch[:i1 - i0]))
 
-    csv_path = '%s/submission_trn_opt_%d.csv' % (cpdir, t)
-    submission(names_trn, yp_trn_opt, csv_path)
-
-    yp_tst_def = (yp_tst > thresh_def).astype(np.uint8)
-    csv_path = '%s/submission_tst_def_%d.csv' % (cpdir, t)
-    submission(names_tst, yp_tst_def, csv_path)
-
-    yp_tst_opt = (yp_tst > thresh_opt).astype(np.uint8)
-    csv_path = '%s/submission_tst_opt_%d.csv' % (cpdir, t)
-    submission(names_tst, yp_tst_opt, csv_path)
-
-    # Save raw activations.
-    np_path = '%s/yp_trn_%d.npy' % (cpdir, t)
-    np.save(np_path, yp_trn)
-    logger.info('Saved %s.' % np_path)
-
-    np_path = '%s/yp_tst_%d.npy' % (cpdir, t)
-    np.save(np_path, yp_tst)
-    logger.info('Saved %s.' % np_path)
+        # Save raw activations
+        npy_path = '%s/yp_tst_%s.npy' % (model.cpdir, aug_name)
+        np.save(npy_path, yp)
+        logger.info('Saved %s.' % npy_path)
 
 
 def model_runner(model_class):
