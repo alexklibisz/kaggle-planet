@@ -216,12 +216,14 @@ class Godard(object):
         across the entire batch and predictions averaged."""
 
         aug_funcs = [
-            lambda x: x,
-            # lambda x: x[:, ::-1, ...],
-            # lambda x: x[:, :, ::-1],
-            # lambda x: np.rot90(x, 1, axes=(1, 2)),
-            # lambda x: np.rot90(x, 2, axes=(1, 2)),
-            # lambda x: np.rot90(x, 3, axes=(1, 2))
+            lambda x: x,                                          # identity
+            lambda x: x[:, ::-1, ...],                            # vlip
+            lambda x: x[:, :, ::-1],                              # hflip
+            lambda x: np.rot90(x, 1, axes=(1, 2)),                # +90
+            lambda x: np.rot90(x, 2, axes=(1, 2)),                # +180
+            lambda x: np.rot90(x, 3, axes=(1, 2)),                # +270
+            lambda x: np.rot90(x, 1, axes=(1, 2))[:, ::-1, ...],  # vflip(+90)
+            lambda x: np.rot90(x, 1, axes=(1, 2))[:, :, ::-1]     # vflip(+90)
         ]
 
         imgs_batch = self.cfg['pp_imgs_func'](imgs_batch)
