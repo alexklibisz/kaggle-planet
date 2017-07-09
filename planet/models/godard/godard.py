@@ -43,7 +43,8 @@ def _loss_wbc(yt, yp):
 def build_godard_sigmoid(input_shape=(96,96,3), num_outputs=len(TAGS)):
     inputs = Input(shape=input_shape)
 
-    x = BatchNormalization(input_shape=input_shape)(inputs)
+    x = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')(inputs)
+    x = BatchNormalization(input_shape=input_shape)(x)
 
     x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
     x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
@@ -72,13 +73,7 @@ def build_godard_sigmoid(input_shape=(96,96,3), num_outputs=len(TAGS)):
     x = Dropout(0.5)(x)
     outputs = Dense(num_outputs, activation='sigmoid')(x)
 
-    def preprocess_jpg(x):
-        return x * 1. / 255.
-
-    def preprocess_tags(x):
-        return x
-
-    return Model(inputs=inputs, outputs=outputs), preprocess_jpg, preprocess_tags
+    return Model(inputs=inputs, outputs=outputs)
 
 class Godard(object):
 
@@ -92,8 +87,6 @@ class Godard(object):
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
             'input_shape': (96, 96, 3),
-            'pp_imgs_func': lambda x: x,
-            'pp_tags_func': lambda x: x,
 
             # Network setup.
             'net_builder_func': build_godard_sigmoid,
@@ -111,18 +104,17 @@ class Godard(object):
             'trn_monitor_val': False,
 
             # Testing.
-            'tst_batch_size': 2400
+            'tst_batch_size': 128
         }
 
         # Set up network.
-        self.net, ppif, pptf = self.cfg['net_builder_func'](self.cfg['input_shape'])
-        self.cfg['pp_imgs_func'], self.cfg['pp_tags_func'] = ppif, pptf
-
         if model_json:
             self.net = model_from_json(model_json)
+        else:
+            self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
 
         if weights_path:
-            self.net.load_weights(weights_path)
+            self.net.load_weights(weights_path, by_name=True)
 
     @property
     def cpdir(self):
@@ -209,31 +201,31 @@ class Godard(object):
                     for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max + 1)):
                         ib[bidx] = aug(ib[bidx])
 
-                yield self.cfg['pp_imgs_func'](ib), self.cfg['pp_tags_func'](tb)
+                yield ib, tb
 
-    def predict_batch(self, imgs_batch):
-        """Predict a single batch of images with augmentation. Augmentations vectorized
-        across the entire batch and predictions averaged."""
+    def predict_batch(self, imgs_batch, augment=False):
+        """Predict a single batch of images, optionally with augmentation. Augmentations
+        vectorized across the entire batch and predictions averaged."""
+        if augment:
+            aug_funcs = [
+                lambda x: x,                                          # identity
+                lambda x: x[:, ::-1, ...],                            # vlip
+                lambda x: x[:, :, ::-1],                              # hflip
+                lambda x: np.rot90(x, 1, axes=(1, 2)),                # +90
+                lambda x: np.rot90(x, 2, axes=(1, 2)),                # +180
+                lambda x: np.rot90(x, 3, axes=(1, 2)),                # +270
+                lambda x: np.rot90(x, 1, axes=(1, 2))[:, ::-1, ...],  # vflip(+90)
+                lambda x: np.rot90(x, 1, axes=(1, 2))[:, :, ::-1]     # vflip(+90)
+            ]
 
-        aug_funcs = [
-            lambda x: x,                                          # identity
-            lambda x: x[:, ::-1, ...],                            # vlip
-            lambda x: x[:, :, ::-1],                              # hflip
-            lambda x: np.rot90(x, 1, axes=(1, 2)),                # +90
-            lambda x: np.rot90(x, 2, axes=(1, 2)),                # +180
-            lambda x: np.rot90(x, 3, axes=(1, 2)),                # +270
-            lambda x: np.rot90(x, 1, axes=(1, 2))[:, ::-1, ...],  # vflip(+90)
-            lambda x: np.rot90(x, 1, axes=(1, 2))[:, :, ::-1]     # vflip(+90)
-        ]
-
-        imgs_batch = self.cfg['pp_imgs_func'](imgs_batch)
-        yp = np.zeros((imgs_batch.shape[0], len(TAGS)))
-        for aug_func in aug_funcs:
-            imgs_batch = aug_func(imgs_batch)
-            tags_batch = self.net.predict(imgs_batch)
-            yp += tags_batch / len(aug_funcs)
-
-        return yp
+            yp = np.zeros((imgs_batch.shape[0], len(TAGS)))
+            for aug_func in aug_funcs:
+                imgs_batch = aug_func(imgs_batch)
+                tags_batch = self.net.predict(imgs_batch)
+                yp += tags_batch / len(aug_funcs)
+            return yp
+        else:
+            return self.net.predict_on_batch(imgs_batch)
 
     def predict(self, dataset):
 
