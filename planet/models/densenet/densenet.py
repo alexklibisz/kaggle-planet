@@ -1,7 +1,7 @@
 from itertools import cycle
 from keras.optimizers import SGD, Adam
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
-from keras.models import Model, model_from_json
+from keras.models import Model, model_from_json, load_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback
 from keras.layers.advanced_activations import PReLU
 from keras.regularizers import l2
@@ -47,9 +47,9 @@ def _densenet121(input_shape=(224, 224, 3), pretrained=False):
     from planet.utils.multi_gpu import make_parallel
 
     def preprocess_zc(x):
-        R = (x[:, :, :, 0:1] - 79.416386338) / 38.78731346
-        G = (x[:, :, :, 1:2] - 86.838409053) / 33.77907741
-        B = (x[:, :, :, 2:3] - 76.201647143) / 32.63850828
+        R = (x[:, :, :, 0:1] * 1. - IMG_MEAN_JPG_TRN[0]) / IMG_STDV_JPG_TRN[0]
+        G = (x[:, :, :, 1:2] * 1. - IMG_MEAN_JPG_TRN[1]) / IMG_STDV_JPG_TRN[1]
+        B = (x[:, :, :, 2:3] * 1. - IMG_MEAN_JPG_TRN[2]) / IMG_STDV_JPG_TRN[2]
         return K.concatenate([R, G, B], axis=-1)
 
     # preprocess = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')
@@ -70,9 +70,9 @@ def _densenet169(input_shape=(224, 224, 3), pretrained=False):
     from planet.utils.multi_gpu import make_parallel
 
     def preprocess_zc(x):
-        R = (x[:, :, :, 0:1] - 79.416386338) / 38.78731346
-        G = (x[:, :, :, 1:2] - 86.838409053) / 33.77907741
-        B = (x[:, :, :, 2:3] - 76.201647143) / 32.63850828
+        R = (x[:, :, :, 0:1] * 1. - IMG_MEAN_JPG_TRN[0]) / IMG_STDV_JPG_TRN[0]
+        G = (x[:, :, :, 1:2] * 1. - IMG_MEAN_JPG_TRN[1]) / IMG_STDV_JPG_TRN[1]
+        B = (x[:, :, :, 2:3] * 1. - IMG_MEAN_JPG_TRN[2]) / IMG_STDV_JPG_TRN[2]
         return K.concatenate([R, G, B], axis=-1)
 
     # preprocess = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')
@@ -96,7 +96,7 @@ def _densenet169_pretrained(input_shape=(224, 224, 3)):
 
 class DenseNet121(object):
 
-    def __init__(self, model_json=None, weights_path=None):
+    def __init__(self, model_path=None):
 
         # Configuration.
         self.cfg = {
@@ -108,7 +108,7 @@ class DenseNet121(object):
             'input_shape': (160, 160, 3),
 
             # Network setup.
-            # 'net_builder_func': _densenet169,
+            'net_builder_func': _densenet169,
             # 'net_builder_func': _densenet121,
             # 'trn_optimizer': Adam,
             # 'trn_optimizer_args': {'lr': 0.002},
@@ -116,7 +116,7 @@ class DenseNet121(object):
             # 'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': 1},
 
             # 'net_builder_func': _densenet169_pretrained,
-            'net_builder_func': _densenet121_pretrained,
+            # 'net_builder_func': _densenet121_pretrained,
             'trn_optimizer': SGD,
             'trn_optimizer_args': {'lr': 0.001, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': 1},
 
@@ -132,18 +132,19 @@ class DenseNet121(object):
             'trn_monitor_val': True,
 
             # Testing.
-            'tst_batch_size': 1500
+            'tst_batch_size': 500
         }
 
-        # Set up network.
-        if model_json:
+        if model_path:
             from planet.models.densenet.scale_layer import Scale
-            self.net = model_from_json(model_json, {'Scale': Scale})
+            self.net = load_model(model_path, {
+                'Scale': Scale,
+                'IMG_MEAN_JPG_TRN': IMG_MEAN_JPG_TRN,
+                'IMG_STDV_JPG_TRN': IMG_STDV_JPG_TRN,
+            }, compile=False)
+            self.cfg['input_shape'] = self.net.input_shape[1:]
         else:
             self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
-
-        if weights_path:
-            self.net.load_weights(weights_path, by_name=True)
 
     @property
     def cpdir(self):
@@ -152,7 +153,7 @@ class DenseNet121(object):
         return self.cfg['cpdir']
 
     def serialize(self):
-        json.dump(self.net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
+        self.net.save('%s/model.hdf5' % self.cpdir)
         json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
         pprint(self.cfg)
 
@@ -222,7 +223,6 @@ class DenseNet121(object):
                 yield ib, tb
 
     def predict_batch(self, imgs_batch):
-        """Predict a single batch of images."""
         return self.net.predict(imgs_batch)
 
 if __name__ == "__main__":

@@ -24,12 +24,7 @@ tf.set_random_seed(318)
 
 def train(model_class, args):
 
-    if args['json']:
-        fp = open(args['json'], 'r')
-        args['json'] = json.load(fp)
-        fp.close()
-
-    model = model_class(model_json=args['json'], weights_path=args['weights'])
+    model = model_class(model_path=args['model'])
     model.serialize()
     return model.train()
 
@@ -48,14 +43,9 @@ def predict(model_class, args):
 
     logger = logging.getLogger(funcname())
 
-    if args['json']:
-        fp = open(args['json'], 'r')
-        args['json'] = json.load(fp)
-        fp.close()
-
     # Setup model.
-    model = model_class(args['json'], args['weights'])
-    model.cfg['cpdir'] = '/'.join(args['weights'].split('/')[:-1])
+    model = model_class(model_path=args['model'])
+    model.cfg['cpdir'] = '/'.join(args['model'].split('/')[:-1])
     assert 'hdf5_path_trn' in model.cfg
     assert 'hdf5_path_tst' in model.cfg
     assert 'tst_batch_size' in model.cfg
@@ -83,17 +73,19 @@ def predict(model_class, args):
     for aug_name, aug_func in aug_funcs:
 
         # Train set.
-        logger.info('Augmentation %s.' % (aug_name))
+        logger.info('TTA %s.' % (aug_name))
+        yt = tags_trn[...]
         yp = np.zeros(tags_trn.shape, dtype=np.float32)
-        imgs_batch = np.zeros((model.cfg['tst_batch_size'], *model.net.input_shape[1:]))
+
         for i0 in tqdm(range(0, imgs_trn.shape[0], model.cfg['tst_batch_size'])):
             i1 = i0 + min(model.cfg['tst_batch_size'], imgs_trn.shape[0] - i0)
-            for i in range(i1 - i0):
-                imgs_batch[i] = imresize(imgs_trn[i, :, :, :], model.net.input_shape[1:])
-            yp[i0:i1] = model.predict_batch(aug_func(imgs_batch[:i1 - i0]))
+            ib = np.array([imresize(img[...], model.cfg['input_shape']) for img in imgs_trn[i0:i1]])
+            yp[i0:i1] = model.predict_batch(aug_func(ib))
 
         # Optimize activation thresholds and print F2 as a sanity check.
-        yt = tags_trn[...]
+        f2, p, r = f2pr(yt, (yp > 0.5).astype(np.uint8))
+        logger.info('Default   f2=%.4lf, p=%.4lf, r=%.4lf' % (f2, p, r))
+
         thresh_opt = optimize_thresholds(yt, yp)
         f2, p, r = f2pr(yt, (yp > thresh_opt).astype(np.uint8))
         logger.info('Optimized f2=%.4lf, p=%.4lf, r=%.4lf' % (f2, p, r))
@@ -105,12 +97,12 @@ def predict(model_class, args):
 
         # Test set.
         yp = np.zeros(tags_tst.shape, dtype=np.float32)
-        imgs_batch = np.zeros((model.cfg['tst_batch_size'], *model.net.input_shape[1:]))
+        ib = np.zeros((model.cfg['tst_batch_size'], *model.net.input_shape[1:]))
         for i0 in tqdm(range(0, imgs_tst.shape[0], model.cfg['tst_batch_size'])):
             i1 = i0 + min(model.cfg['tst_batch_size'], imgs_tst.shape[0] - i0)
             for i in range(i1 - i0):
-                imgs_batch[i] = imresize(imgs_tst[i, :, :, :], model.net.input_shape[1:])
-            yp[i0:i1] = model.predict_batch(aug_func(imgs_batch[:i1 - i0]))
+                ib[i] = imresize(imgs_tst[i, :, :, :], model.net.input_shape[1:])
+            yp[i0:i1] = model.predict_batch(aug_func(ib[:i1 - i0]))
 
         # Save raw activations
         npy_path = '%s/yp_tst_%s.npy' % (model.cpdir, aug_name)
@@ -129,14 +121,12 @@ def model_runner(model_class):
     # Training.
     p = sub.add_parser('train', help='training')
     p.set_defaults(which='train')
-    p.add_argument('-j', '--json', help='model JSON definition')
-    p.add_argument('-w', '--weights', help='network weights')
+    p.add_argument('-j', '--model', help='path to serialized model')
 
     # Prediction.
     p = sub.add_parser('predict', help='make predictions')
     p.set_defaults(which='predict')
-    p.add_argument('-j', '--json', help='model JSON definition')
-    p.add_argument('-w', '--weights', help='path to network weights', required=True)
+    p.add_argument('-j', '--model', help='path to serialized model', required=True)
 
     args = vars(parser.parse_args())
     assert args['which'] in ['train', 'predict']
