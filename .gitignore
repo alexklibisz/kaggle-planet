@@ -1,4 +1,5 @@
 checkpoints/*
+ensembles/*
 data
 **/*.pyc
 **/__pycache__
@@ -6,4 +7,3 @@ data
 !*/.keep
 notebooks/.ipynb_checkpoints
 notebooks/*.hdf5
-ensembles
