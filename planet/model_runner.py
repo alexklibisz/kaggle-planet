@@ -14,6 +14,7 @@ sys.path.append('.')
 from planet.utils.data_utils import optimize_thresholds, tags_f2pr, f2pr, TAGS, binary_to_tagstr
 from planet.utils.runtime import funcname
 
+
 def train(model_class, args):
     model = model_class(model_path=args['model'])
     model.serialize()
@@ -140,6 +141,8 @@ def predict(model_class, args):
     submission(names_trn, (yp_trn_all > 0.5), csv_path)
     csv_path = '%s/submission_trn_%s_opt_%s.csv' % (model.cpdir, 'mean_aug', MD5ID)
     submission(names_trn, (yp_trn_all > thresh_opt), csv_path)
+    csv_path = '%s/submission_tst_%s_def_%s.csv' % (model.cpdir, 'mean_aug', MD5ID)
+    submission(names_tst, (yp_tst_all > 0.5), csv_path)
     csv_path = '%s/submission_tst_%s_opt_%s.csv' % (model.cpdir, 'mean_aug', MD5ID)
     submission(names_tst, (yp_tst_all > thresh_opt), csv_path)
 
