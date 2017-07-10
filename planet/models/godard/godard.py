@@ -108,12 +108,10 @@ class Godard(object):
         }
 
         if model_path:
-            from planet.models.densenet.scale_layer import Scale
             self.net = load_model(model_path, compile=False)
             self.cfg['input_shape'] = self.net.input_shape[1:]
         else:
             self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
-        self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
 
     @property
     def cpdir(self):
