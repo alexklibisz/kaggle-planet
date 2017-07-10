@@ -6,3 +6,4 @@ data
 !*/.keep
 notebooks/.ipynb_checkpoints
 notebooks/*.hdf5
+ensembles
