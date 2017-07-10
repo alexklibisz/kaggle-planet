@@ -1,7 +1,7 @@
 from itertools import cycle
 from keras.optimizers import SGD, Adam
 from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
-from keras.models import Model, model_from_json
+from keras.models import Model, load_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback, LearningRateScheduler
 from keras.layers.advanced_activations import PReLU
 from keras.regularizers import l2
@@ -77,7 +77,7 @@ def build_godard_sigmoid(input_shape=(96,96,3), num_outputs=len(TAGS)):
 
 class Godard(object):
 
-    def __init__(self, model_json=None, weights_path=None):
+    def __init__(self, model_path=None):
 
         # Configuration.
         self.cfg = {
@@ -107,14 +107,11 @@ class Godard(object):
             'tst_batch_size': 128
         }
 
-        # Set up network.
-        if model_json:
-            self.net = model_from_json(model_json)
+        if model_path:
+            self.net = load_model(model_path, compile=False)
+            self.cfg['input_shape'] = self.net.input_shape[1:]
         else:
             self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
-
-        if weights_path:
-            self.net.load_weights(weights_path)
 
     @property
     def cpdir(self):
@@ -123,7 +120,7 @@ class Godard(object):
         return self.cfg['cpdir']
 
     def serialize(self):
-        json.dump(self.net.to_json(), open('%s/model.json' % self.cpdir, 'w'), indent=2)
+        self.net.save('%s/model.hdf5' % self.cpdir)
         json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
         pprint(self.cfg)
 
@@ -156,7 +153,7 @@ class Godard(object):
             # EarlyStopping(monitor='val_loss', patience=3, verbose=1, mode='min'),
             # EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/wvalf2_{epoch:02d}_{val_F2:.3f}.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
+            ModelCheckpoint('%s/mvalf2_{epoch:02d}_{val_F2:.3f}.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
             LearningRateScheduler(lrsched)
             # ReduceLROnPlateau(monitor='F2', factor=0.1, patience=5,
