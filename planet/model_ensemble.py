@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import sys
 from itertools import permutations
+from hyperopt import fmin, hp, tpe, STATUS_OK, Trials
 from operator import itemgetter
 from time import time
 from tqdm import tqdm
@@ -19,7 +20,7 @@ NUM_IMAGES_TRN = 40479
 NUM_IMAGES_TST = 61191
 NUM_OUTPUTS = len(TAGS)
 
-def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_path_tst='data/test-jpg.hdf5', nb_iter=5):
+def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_path_tst='data/test-jpg.hdf5', nb_iter=5, use_hyperopt=True):
     logger = logging.getLogger(funcname())
     np.set_printoptions(formatter={'float': '{: 0.3f}'.format})
 
@@ -85,6 +86,7 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
     results.append((f2_opt, thresh_opt, w))
     logger.info('Equal weights: f2 = %f' % f2_opt)
 
+
     # Try using each member individually.
     w = np.zeros((N_trn, NUM_OUTPUTS), dtype=np.float16)
     for it in range(N_trn):
@@ -99,24 +101,57 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
                 best_idx = len(results)-1
                 logger.info('f2 improved from %lf to %lf' % (old_best, f2_opt))
 
-    # Randomly choose a weight for each tag across all member predictions.
-    logger.info('Searching random weights...')
-    f2_scores = []
-    for it in range(nb_iter):
-        w = np.random.rand(N_trn, NUM_OUTPUTS)
-        f2_opt, thresh_opt, w = get_weighted_optimized_results(yt_trn, yp_trn_all, w)
-        f2_scores.append(f2_opt)
-        if f2_opt > 0.88:
-            results.append((f2_opt, thresh_opt, w))
-            if f2_opt > results[best_idx][0]:
-                old_best = results[best_idx][0]
-                best_idx = len(results)-1
-                logger.info('%-05.2lf: f2 improved from %lf to %lf:\n%s' % ((it / nb_iter * 100), old_best, f2_opt, w))
-        
-        if it % 50 == 0:
-            logger.info('%-05.2lf: f2 mean=%.4lf, min=%.4lf, max=%.4lf, stdv=%.4lf, unique=%d' % \
-                 ((it / nb_iter * 100), np.mean(f2_scores), np.min(f2_scores), np.max(f2_scores), 
-                    np.std(f2_scores), len(np.unique(f2_scores))))
+    if use_hyperopt:
+        def objective(w, yt_trn=yt_trn, yp_trn_all=yp_trn_all):
+            w = np.array(w).reshape((N_trn, NUM_OUTPUTS))
+            f2, thresh, w = get_weighted_optimized_results(yt_trn, yp_trn_all, w)
+            return {
+                'loss':-f2,
+                'status': STATUS_OK,
+                'thresholds': thresh,
+                'weights': w,
+            }
+        weights_space = [hp.uniform(str(i), 0, 1) for i in range(N_trn*NUM_OUTPUTS)]
+        total = 0
+        for s in weights_space:
+            total += s
+        for i in range(len(weights_space)):
+            weights_space[i] /= total
+
+        trials = Trials()
+        best = fmin(objective, space=weights_space, algo=tpe.suggest, max_evals=nb_iter, trials=trials)
+        sortedTrials = sorted(trials.trials, key=lambda x: x['result']['loss'])[:10]
+
+        # Process hyperopt results into our results list
+        for t in sortedTrials:
+            f2_opt = -t['result']['loss']
+            thresh_opt = t['result']['thresholds']
+            w = t['result']['weights']
+            if f2_opt > 0.88:
+                results.append((f2_opt, thresh_opt, w))
+                if f2_opt > results[best_idx][0]:
+                    old_best = results[best_idx][0]
+                    best_idx = len(results)-1
+                    logger.info('f2 improved from %lf to %lf' % (old_best, f2_opt))
+    else:
+        # Randomly choose a weight for each tag across all member predictions.
+        logger.info('Searching random weights...')
+        f2_scores = []
+        for it in range(nb_iter):
+            w = np.random.rand(N_trn, NUM_OUTPUTS)
+            f2_opt, thresh_opt, w = get_weighted_optimized_results(yt_trn, yp_trn_all, w)
+            f2_scores.append(f2_opt)
+            if f2_opt > 0.88:
+                results.append((f2_opt, thresh_opt, w))
+                if f2_opt > results[best_idx][0]:
+                    old_best = results[best_idx][0]
+                    best_idx = len(results)-1
+                    logger.info('%-05.2lf: f2 improved from %lf to %lf:\n%s' % ((it / nb_iter * 100), old_best, f2_opt, w))
+
+            if it % 50 == 0:
+                logger.info('%-05.2lf: f2 mean=%.4lf, min=%.4lf, max=%.4lf, stdv=%.4lf, unique=%d' % \
+                     ((it / nb_iter * 100), np.mean(f2_scores), np.min(f2_scores), np.max(f2_scores), 
+                        np.std(f2_scores), len(np.unique(f2_scores))))
 
     # Get image names from hdf5 file
     data_tst = h5py.File(hdf5_path_tst, 'r')
