@@ -34,12 +34,24 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
     yp_trn_all, yp_tst_all = [], []
     for i, p_trn in enumerate(paths_yp_trn):
         logger.info(p_trn)
+
         p_tst = p_trn.replace('trn', 'tst')
         if not os.path.exists(p_tst):
             logger.warning("Skipping %s because it doesn't have a matching test file." % p_trn)
             continue
-        yp_trn_all.append(np.load(p_trn))
-        yp_tst_all.append(np.load(p_tst))
+
+        yp_trn = np.load(p_trn)
+        if yp_trn.shape != (NUM_IMAGES_TRN, NUM_OUTPUTS):
+            logger.warning("Skipping %s because the trn shape is incorrect" % p_trn)
+            continue
+
+        yp_tst = np.load(p_tst)
+        if yp_tst.shape != (NUM_IMAGES_TST, NUM_OUTPUTS):
+            logger.warning("Skipping %s because the tst shape is incorrect" % p_tst)
+            continue
+
+        yp_trn_all.append(yp_trn)
+        yp_tst_all.append(yp_tst)
         paths_yp_trn_valid.append(p_trn)
 
     N_trn = len(paths_yp_trn_valid)
@@ -99,7 +111,7 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
             if f2_opt > results[best_idx][0]:
                 old_best = results[best_idx][0]
                 best_idx = len(results)-1
-                logger.info('%3d: f2 improved from %lf to %lf:\n%s' % (it, old_best, f2_opt, w))
+                logger.info('%-05.2lf: f2 improved from %lf to %lf:\n%s' % ((it / nb_iter * 100), old_best, f2_opt, w))
         
         if it % 50 == 0:
             logger.info('%-05.2lf: f2 mean=%.4lf, min=%.4lf, max=%.4lf, stdv=%.4lf, unique=%d' % \
