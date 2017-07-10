@@ -20,9 +20,30 @@ NUM_IMAGES_TRN = 40479
 NUM_IMAGES_TST = 61191
 NUM_OUTPUTS = len(TAGS)
 
+TIME = int(time())
+ENSEMBLE_DIR = 'ensembles'
+
+def get_weighted_yp(w, yp_all):
+    # TODO: remove for-loop and only use matrix operations
+    yp = np.zeros(yp_all.shape[1:])
+    for w_mem, yp_mem in zip(w, yp_all):
+        yp += w_mem*yp_mem
+    return yp
+
+def get_weighted_optimized_results(yt_trn, yp_trn_all, w):
+    w /= np.sum(w, axis=0)                  # Normalize weights
+    yp_trn = get_weighted_yp(w, yp_trn_all) # Get weighted average for yp
+    thresh_opt = optimize_thresholds(yt_trn, yp_trn)
+    f2_opt, p_opt, r_opt = f2pr(yt_trn, (yp_trn > thresh_opt).astype(np.uint8))
+    return f2_opt, thresh_opt, w
+
 def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_path_tst='data/test-jpg.hdf5', nb_iter=5, use_hyperopt=True):
     logger = logging.getLogger(funcname())
     np.set_printoptions(formatter={'float': '{: 0.3f}'.format})
+
+    # Get image names from hdf5 file
+    data_tst = h5py.File(hdf5_path_tst, 'r')
+    names_tst = data_tst.attrs['names'].split(',')
 
     # Read spreadsheet values to get prediction paths.
     df = pd.read_csv(ensemble_def_file) 
@@ -63,20 +84,6 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
     data_trn = h5py.File(hdf5_path_trn, 'r')
     yt_trn = data_trn.get('tags')[...]
 
-    def get_weighted_yp(w, yp_all):
-        # TODO: remove for-loop and only use matrix operations
-        yp = np.zeros(yp_all.shape[1:])
-        for w_mem, yp_mem in zip(w, yp_all):
-            yp += w_mem*yp_mem
-        return yp
-
-    def get_weighted_optimized_results(yt_trn, yp_trn_all, w):
-        w /= np.sum(w, axis=0)                  # Normalize weights
-        yp_trn = get_weighted_yp(w, yp_trn_all) # Get weighted average for yp
-        thresh_opt = optimize_thresholds(yt_trn, yp_trn)
-        f2_opt, p_opt, r_opt = f2pr(yt_trn, (yp_trn > thresh_opt).astype(np.uint8))
-        return f2_opt, thresh_opt, w
-
     # results format: [(F2 score, tag thresholds, ensemble weights)]
     results, best_idx = [], 0
 
@@ -100,15 +107,25 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
                 old_best = results[best_idx][0]
                 best_idx = len(results)-1
                 logger.info('f2 improved from %lf to %lf' % (old_best, f2_opt))
+                serialize_ensemble(f2_opt, thresh_opt, w, names_tst, yp_tst_all, yp_trn_all, paths_yp_trn_valid)
 
     if use_hyperopt:
-        def objective(w, yt_trn=yt_trn, yp_trn_all=yp_trn_all):
+        trials = Trials()
+        def objective(w, trials=trials, yt_trn=yt_trn,
+                    yp_trn_all=yp_trn_all, yp_tst_all=yp_tst_all,
+                    paths_yp_trn_valid=paths_yp_trn_valid,
+                    names_tst=names_tst):
             w = np.array(w).reshape((N_trn, NUM_OUTPUTS))
-            f2, thresh, w = get_weighted_optimized_results(yt_trn, yp_trn_all, w)
+            f2_opt, thresh_opt, w = get_weighted_optimized_results(yt_trn, yp_trn_all, w)
+            if len(trials.trials) > 1:
+                if f2_opt > -trials.best_trial['result']['loss']:
+                    logger = logging.getLogger(funcname())
+                    logger.info('hyperopt f2 improved from %lf to %lf' % (-trials.best_trial['result']['loss'], f2_opt))
+                    serialize_ensemble(f2_opt, thresh_opt, w, names_tst, yp_tst_all, yp_trn_all, paths_yp_trn_valid)
             return {
-                'loss':-f2,
+                'loss':-f2_opt,
                 'status': STATUS_OK,
-                'thresholds': thresh,
+                'thresholds': thresh_opt,
                 'weights': w,
             }
         weights_space = [hp.uniform(str(i), 0, 1) for i in range(N_trn*NUM_OUTPUTS)]
@@ -118,7 +135,6 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
         for i in range(len(weights_space)):
             weights_space[i] /= total
 
-        trials = Trials()
         best = fmin(objective, space=weights_space, algo=tpe.suggest, max_evals=nb_iter, trials=trials)
         sortedTrials = sorted(trials.trials, key=lambda x: x['result']['loss'])[:10]
 
@@ -130,9 +146,7 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
             if f2_opt > 0.88:
                 results.append((f2_opt, thresh_opt, w))
                 if f2_opt > results[best_idx][0]:
-                    old_best = results[best_idx][0]
                     best_idx = len(results)-1
-                    logger.info('f2 improved from %lf to %lf' % (old_best, f2_opt))
     else:
         # Randomly choose a weight for each tag across all member predictions.
         logger.info('Searching random weights...')
@@ -147,33 +161,42 @@ def model_ensemble(ensemble_def_file, hdf5_path_trn='data/train-jpg.hdf5', hdf5_
                     old_best = results[best_idx][0]
                     best_idx = len(results)-1
                     logger.info('%-05.2lf: f2 improved from %lf to %lf:\n%s' % ((it / nb_iter * 100), old_best, f2_opt, w))
+                    serialize_ensemble(f2_opt, thresh_opt, w, names_tst, yp_tst_all, yp_trn_all, paths_yp_trn_valid)
 
             if it % 50 == 0:
                 logger.info('%-05.2lf: f2 mean=%.4lf, min=%.4lf, max=%.4lf, stdv=%.4lf, unique=%d' % \
                      ((it / nb_iter * 100), np.mean(f2_scores), np.min(f2_scores), np.max(f2_scores), 
                         np.std(f2_scores), len(np.unique(f2_scores))))
 
-    # Get image names from hdf5 file
-    data_tst = h5py.File(hdf5_path_tst, 'r')
-    names_tst = data_tst.attrs['names'].split(',')
-
     # Make submissions with best 10 results.
     results = sorted(results, key=lambda x: x[0], reverse=True)[:10]
-    t = time()
+    for f2, thresh_opt, w in results:
+        serialize_ensemble(f2, thresh_opt, w, names_tst, yp_tst_all, yp_trn_all, paths_yp_trn_valid)
 
-    # Checkpoint dir for this ensemble.
-    cpdir = 'checkpoints/ensemble_%d' % (int(time()))
-    if not os.path.exists(cpdir):
-        os.mkdir(cpdir)
+def serialize_ensemble(f2, thresh_opt, w, names_tst, yp_tst_all, yp_trn_all, paths_yp_trn_valid):
+    logger = logging.getLogger(funcname())
+    fstem = '%s/ensemble_%.6f_%d' % (ENSEMBLE_DIR, f2, TIME)
+    logger.info('Making submission with f2 = %lf' % f2)
+    yp_tst = get_weighted_yp(w, yp_tst_all)
+    yp_tst_opt = (yp_tst > thresh_opt).astype(np.uint8)
+    submission(names_tst, yp_tst_opt, '%s.csv' % fstem)
 
-    for idx, (f2, thresh_opt, w) in enumerate(results):
-        logger.info('Making submission with f2 = %lf' % f2)
-        yp_tst = get_weighted_yp(w, yp_tst_all)
-        yp_tst_opt = (yp_tst > thresh_opt).astype(np.uint8)
-        stem = '%s/submission_tst_opt_%d_%.6f_%02d' % (cpdir, t, f2, idx)
-        np.savez('%s.npz'%stem, weights=w, thresholds=thresh_opt)
-        submission(names_tst, yp_tst_opt, '%s.csv' % stem)
+    f = h5py.File('%s.hdf5' % fstem, 'w')
+    f.attrs['paths_to_npy_files'] = ','.join(paths_yp_trn_valid)
 
+    ds = f.create_dataset('weights', w.shape, dtype=w.dtype)
+    ds[...] = w
+
+    ds = f.create_dataset('thresholds', thresh_opt.shape, dtype=thresh_opt.dtype)
+    ds[...] = thresh_opt
+
+    ds = f.create_dataset('yp_tst_cmb', yp_tst.shape, dtype=yp_tst.dtype)
+    ds[...] = yp_tst
+
+    yp_trn = get_weighted_yp(w, yp_trn_all)
+    ds = f.create_dataset('yp_trn_cmb', yp_trn.shape, dtype=yp_trn.dtype)
+    ds[...] = yp_trn
+    f.close()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
@@ -182,4 +205,6 @@ if __name__ == "__main__":
     assert len(sys.argv) == 3, "python model_ensemble.py path_to_ensemble_csv nb_iter"
     assert os.path.exists(sys.argv[1]), "ensemble csv file not found"
 
+    if not os.path.exists(ENSEMBLE_DIR):
+        os.mkdir(ENSEMBLE_DIR)
     model_ensemble(sys.argv[1], nb_iter=int(sys.argv[2]))
