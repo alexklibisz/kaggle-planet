@@ -5,7 +5,6 @@ import logging
 import numpy as np
 import os
 import pandas as pd
-import tensorflow as tf
 from hashlib import md5
 from scipy.misc import imresize
 from time import time
@@ -14,14 +13,6 @@ import sys
 sys.path.append('.')
 from planet.utils.data_utils import optimize_thresholds, tags_f2pr, f2pr, TAGS, binary_to_tagstr
 from planet.utils.runtime import funcname
-
-np.random.seed(int(time()) + os.getpid())
-tf.set_random_seed(1 + int(time()) + os.getpid())
-
-# Overwrite the random seed
-np.random.seed(317)
-tf.set_random_seed(318)
-
 
 def train(model_class, args):
     model = model_class(model_path=args['model'])
@@ -162,6 +153,14 @@ def predict(model_class, args):
 
 
 def model_runner(model_class):
+    import tensorflow as tf
+
+    np.random.seed(int(time()) + os.getpid())
+    tf.set_random_seed(1 + int(time()) + os.getpid())
+
+    # Overwrite the random seed
+    np.random.seed(317)
+    tf.set_random_seed(318)
 
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
