@@ -1,6 +1,6 @@
 from itertools import cycle
 from keras.optimizers import SGD, Adam
-from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation
+from keras.layers import Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, Reshape, concatenate, Lambda, BatchNormalization, Activation, LocallyConnected1D, average
 from keras.models import Model, load_model
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping, TerminateOnNaN, Callback, LearningRateScheduler
 from keras.layers.advanced_activations import PReLU
@@ -40,10 +40,8 @@ def _loss_wbc(yt, yp):
     wmat = fnmat + fpmat + 1
     return K.mean(loss * wmat, axis=-1)
 
-def build_godard_sigmoid(input_shape=(96,96,3), num_outputs=len(TAGS)):
-    inputs = Input(shape=input_shape)
-
-    x = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')(inputs)
+def _godard(inputs, num_outputs=len(TAGS), input_shape=(96,96,3), output_activation='sigmoid'):
+    x = Lambda(lambda x: x * 1. / 255., input_shape=input_shape)(inputs)
     x = BatchNormalization(input_shape=input_shape)(x)
 
     x = Conv2D(32, (3, 3), padding='same', activation='relu')(x)
@@ -71,14 +69,46 @@ def build_godard_sigmoid(input_shape=(96,96,3), num_outputs=len(TAGS)):
     x = Dense(512, activation='relu')(x)
     x = BatchNormalization()(x)
     x = Dropout(0.5)(x)
-    outputs = Dense(num_outputs, activation='sigmoid')(x)
+    return Dense(num_outputs, activation=output_activation)(x)
 
+def build_godard_sigmoid(input_shape=(96,96,3)):
+    inputs = Input(shape=input_shape)
+    outputs = _godard(inputs, input_shape=input_shape)
     return Model(inputs=inputs, outputs=outputs)
+
+# This is a first pass at a network that combines outputs from other networks
+def build_godard_ensemble(input_shape=(96,96,3), ensemble_size=2):
+    inputs = Input(shape=input_shape)
+    ensemble_outputs = [_godard(inputs, input_shape=input_shape) for i in range(ensemble_size)]
+    for i,x in enumerate(ensemble_outputs):
+        x = Reshape((17,1))(x)
+        x = LocallyConnected1D(1, 1)(x)
+        x = Reshape((17,))(x)
+        ensemble_outputs[i] = x
+
+    outputs = average(ensemble_outputs)
+    return Model(inputs=inputs, outputs=outputs)
+
+
+# This is an attempt to do what this paper said was possible: http://proceedings.mlr.press/v54/eban17a/eban17a.pdf
+def f2_hinge_loss(yt, yp):
+    allp = K.sum(yt)
+    yp =  K.maximum(0.0, 1 - (yt*2-1)*(yp - 0.5)) # hinge loss
+    tp = K.sum(yt * (1-yp))
+    fp = K.sum((1-yt)*yp)
+    b = 2
+    return -(1 + b**2)*tp/(allp*(b**2) + tp + fp + K.epsilon())
+
+def f2_loss(yt, yp):
+    allp = K.sum(yt)
+    tp = K.sum(yt * yp)
+    fp = K.sum(K.clip(yp - yt, 0, 1))
+    b = 2
+    return -(1 + b**2)*tp/(allp*(b**2) + tp + fp + K.epsilon())
 
 class Godard(object):
 
     def __init__(self, model_path=None):
-
         # Configuration.
         self.cfg = {
 
@@ -112,6 +142,7 @@ class Godard(object):
             self.cfg['input_shape'] = self.net.input_shape[1:]
         else:
             self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
+        #self.net.summary()
 
     @property
     def cpdir(self):
