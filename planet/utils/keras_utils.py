@@ -3,6 +3,7 @@ from keras.engine import Layer
 from math import ceil
 from shutil import copyfile
 from sklearn.metrics import fbeta_score, precision_score, recall_score
+from termcolor import colored
 from time import sleep, ctime
 from tqdm import tqdm
 import keras.backend as K
@@ -48,15 +49,20 @@ def tag_metrics():
     # Generate an F2 metric for each tag.
     metrics = []
     for i, t in enumerate(TAGS):
-        @rename('%s_p' % t[:4].upper())
+        @rename('%s_prec' % t[:4].upper())
         def tagp(yt, yp, i=i):
             return prec(yt[:, i], yp[:, i])
         metrics.append(tagp)
 
-        @rename('%s_r' % t[:4].upper())
+        @rename('%s_reca' % t[:4].upper())
         def tagr(yt, yp, i=i):
             return reca(yt[:, i], yp[:, i])
         metrics.append(tagr)
+
+        @rename('%s_f2' % t[:4].upper())
+        def tagf(yt, yp, i=i):
+            return F2(yt[:, i], yp[:, i])
+        metrics.append(tagf)
 
     return metrics
 
@@ -78,61 +84,61 @@ class ThresholdedSigmoid(Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
-class ParamStatsCB(Callback):
-    '''Compute metrics about network parameters over time.'''
+# class ParamStatsCB(Callback):
+#     '''Compute metrics about network parameters over time.'''
 
-    def __init__(self, cpdir):
-        super(Callback, self).__init__()
-        self.cpdir = cpdir
-        self.trainable_lidxs = []
-        self.lidx_w_prev = None
-        self.lidx_b_prev = None
-        self.lidx_wstd = None
-        self.lidx_b_std = None
-        self.lidx_wratio = None
-        self.lidx_b_ratio = None
-        self.counter = 0
+#     def __init__(self, cpdir):
+#         super(Callback, self).__init__()
+#         self.cpdir = cpdir
+#         self.trainable_lidxs = []
+#         self.lidx_w_prev = None
+#         self.lidx_b_prev = None
+#         self.lidx_wstd = None
+#         self.lidx_b_std = None
+#         self.lidx_wratio = None
+#         self.lidx_b_ratio = None
+#         self.counter = 0
 
-    def on_train_begin(self, logs):
-        self.trainable_lidxs = [i for i, l in enumerate(self.model.layers)
-                                if len(l.trainable_weights) > 0]
-        self.lidx_wb_prev = {li: None for li in self.trainable_lidxs}
-        self.lidx_wstats = {li: [] for li in self.trainable_lidxs}
-        self.lidx_wratio = {li: [] for li in self.trainable_lidxs}
+#     def on_train_begin(self, logs):
+#         self.trainable_lidxs = [i for i, l in enumerate(self.model.layers)
+#                                 if len(l.trainable_weights) > 0]
+#         self.lidx_wb_prev = {li: None for li in self.trainable_lidxs}
+#         self.lidx_wstats = {li: [] for li in self.trainable_lidxs}
+#         self.lidx_wratio = {li: [] for li in self.trainable_lidxs}
 
-    def on_batch_end(self, batch, logs):
-        '''Compute metrics and update for next iteration.'''
+#     def on_batch_end(self, batch, logs):
+#         '''Compute metrics and update for next iteration.'''
 
-        if batch % 10:
-            return
+#         if batch % 10:
+#             return
 
-        lidx_wb = {li: self.model.layers[li].get_weights()[0:] for li in self.trainable_lidxs}
+#         lidx_wb = {li: self.model.layers[li].get_weights()[0:] for li in self.trainable_lidxs}
 
-        # Compute comparisons against previous weights.
-        # - Standard deviation of weights.
-        # - Ratio of weight magnitude to the most recent update delta.
-        if self.counter > 0:
-            for li in self.trainable_lidxs:
-                w0 = self.lidx_wb_prev[li][0]
-                w1 = lidx_wb[li][0]
-                self.lidx_wstats[li].append((np.mean(w1), np.var(w1)))
-                self.lidx_wratio[li].append(np.mean(np.abs(w1 - w0) / (np.abs(w1) + 1e-7)))
+#         # Compute comparisons against previous weights.
+#         # - Standard deviation of weights.
+#         # - Ratio of weight magnitude to the most recent update delta.
+#         if self.counter > 0:
+#             for li in self.trainable_lidxs:
+#                 w0 = self.lidx_wb_prev[li][0]
+#                 w1 = lidx_wb[li][0]
+#                 self.lidx_wstats[li].append((np.mean(w1), np.var(w1)))
+#                 self.lidx_wratio[li].append(np.mean(np.abs(w1 - w0) / (np.abs(w1) + 1e-7)))
 
-        self.lidx_wb_prev = lidx_wb
-        self.counter += 1
+#         self.lidx_wb_prev = lidx_wb
+#         self.counter += 1
 
-    def on_epoch_end(self, epoch, logs):
-        '''Print metrics for this epoch and save metrics to disk.'''
-        print('\n Epoch %d: mean stats for each layer:' % (epoch))
-        for li in self.trainable_lidxs:
-            layer = self.model.layers[li]
-            means = [m for m, s in self.lidx_wstats[li][-self.counter:]]
-            varcs = [s for m, s in self.lidx_wstats[li][-self.counter:]]
-            print('%-30s w mean=%-8.4lf w variance=%-8.4lf' % (layer.name, np.mean(means), np.mean(varcs)))
-        self.counter = 0
-        payload = {'lidx_wstats': self.lidx_wstats, 'lidx_wratio': self.lidx_wratio}
-        with open('%s/param_stats.pkl' % self.cpdir, 'wb') as f:
-            pkl.dump(payload, f)
+#     def on_epoch_end(self, epoch, logs):
+#         '''Print metrics for this epoch and save metrics to disk.'''
+#         print('\n Epoch %d: mean stats for each layer:' % (epoch))
+#         for li in self.trainable_lidxs:
+#             layer = self.model.layers[li]
+#             means = [m for m, s in self.lidx_wstats[li][-self.counter:]]
+#             varcs = [s for m, s in self.lidx_wstats[li][-self.counter:]]
+#             print('%-30s w mean=%-8.4lf w variance=%-8.4lf' % (layer.name, np.mean(means), np.mean(varcs)))
+#         self.counter = 0
+#         payload = {'lidx_wstats': self.lidx_wstats, 'lidx_wratio': self.lidx_wratio}
+#         with open('%s/param_stats.pkl' % self.cpdir, 'wb') as f:
+#             pkl.dump(payload, f)
 
 
 class TensorBoardWrapper(TensorBoard):
@@ -211,7 +217,14 @@ class ValidationCB(Callback):
         logger = logging.getLogger(funcname())
         for tag in TAGS:
             tm = self.tag_metrics[tag]
-            logger.info('%-20s F2=%.5lf Prec=%.5lf Reca=%.5lf' % (tag, tm['f2'][-1], tm['prec'][-1], tm['reca'][-1]))
+            s = '%-20s F2=%.5lf Prec=%.5lf Reca=%.5lf' % (tag, tm['f2'][-1], tm['prec'][-1], tm['reca'][-1])
+            if tm['f2'][-1] > 0.9:
+                s = colored(s, 'green')
+            elif tm['f2'][-1] > 0.8:
+                s = colored(s, 'yellow')
+            else:
+                s = colored(s, 'red')
+            logger.info(s)
         logger.info('Best thresholds: %s' % self.best_thresholds[-1])
 
         # # Save to disk.

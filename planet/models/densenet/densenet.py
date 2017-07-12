@@ -17,6 +17,7 @@ import logging
 import math
 import numpy as np
 import os
+import pandas as pd
 
 import sys
 sys.path.append('.')
@@ -75,10 +76,9 @@ def _densenet169(input_shape=(224, 224, 3), pretrained=False):
         B = (x[:, :, :, 2:3] * 1. - IMG_MEAN_JPG_TRN[2]) / IMG_STDV_JPG_TRN[2]
         return K.concatenate([R, G, B], axis=-1)
 
-    # preprocess = Lambda(lambda x: x * 1. / 255., input_shape=input_shape, name='preprocess')
     preprocess = Lambda(preprocess_zc, input_shape=input_shape, name='preprocess')
     dns = densenet169_model(img_rows=input_shape[0], img_cols=input_shape[1], color_type=input_shape[2],
-                            dropout_rate=0.0, pretrained=pretrained, preprocess_layer=preprocess)
+                            dropout_rate=0.2, pretrained=pretrained, preprocess_layer=preprocess)
     shared_out = dns.output
     x = Dense(len(TAGS), kernel_initializer='he_normal')(shared_out)
     x = Activation('sigmoid')(x)
@@ -105,34 +105,36 @@ class DenseNet121(object):
             'cpdir': 'checkpoints/DenseNet_%d_%d' % (int(time()), os.getpid()),
             'hdf5_path_trn': 'data/train-jpg.hdf5',
             'hdf5_path_tst': 'data/test-jpg.hdf5',
-            'input_shape': (160, 160, 3),
+            'input_shape': (224, 224, 3),
 
             # Network setup.
-            'net_builder_func': _densenet169,
-            # 'net_builder_func': _densenet121,
+            # 'net_builder_func': _densenet169,
+            'net_builder_func': _densenet121,
             # 'trn_optimizer': Adam,
             # 'trn_optimizer_args': {'lr': 0.002},
-            # 'trn_optimizer': SGD,
-            # 'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': 1},
+            'trn_optimizer': SGD,
+            'trn_optimizer_args': {'lr': 0.1, 'decay': 1e-4, 'momentum': 0.9, 'nesterov': 1},
 
             # 'net_builder_func': _densenet169_pretrained,
             # 'net_builder_func': _densenet121_pretrained,
-            'trn_optimizer': SGD,
-            'trn_optimizer_args': {'lr': 0.001, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': 1},
-
+            # 'trn_optimizer': SGD,
+            # 'trn_optimizer_args': {'lr': 0.001, 'decay': 1e-6, 'momentum': 0.9, 'nesterov': 1},
+            # 'net_loss_func': 'binary_crossentropy',
             'net_loss_func': _loss_wbc,
 
             # Training setup.
             'trn_epochs': 100,
-            'trn_augment_max_trn': 5,
+            'trn_augment_max_trn': 10,
             'trn_augment_max_val': 0,
-            'trn_batch_size': 44,
+            'trn_batch_size': 20,
             'trn_prop_trn': 0.9,
             'trn_prop_data': 1.0,
             'trn_monitor_val': True,
 
             # Testing.
-            'tst_batch_size': 500
+            'tst_batch_size': 500,
+
+            'seed': os.getpid()
         }
 
         if model_path:
@@ -145,6 +147,8 @@ class DenseNet121(object):
             self.cfg['input_shape'] = self.net.input_shape[1:]
         else:
             self.net = self.cfg['net_builder_func'](self.cfg['input_shape'])
+
+        np.random.seed(self.cfg['seed'])
 
     @property
     def cpdir(self):
@@ -165,8 +169,9 @@ class DenseNet121(object):
         idxs_trn, idxs_val = get_train_val_idxs(tags, self.cfg['trn_prop_data'], self.cfg['trn_prop_trn'])
         steps_trn = math.ceil(len(idxs_trn) / self.cfg['trn_batch_size'])
         steps_val = math.ceil(len(idxs_val) / self.cfg['trn_batch_size'])
-        gen_trn = self.batch_gen(data, idxs_trn, steps_trn, nb_augment_max=self.cfg['trn_augment_max_trn'])
-        gen_val = self.batch_gen(data, idxs_val, steps_val, nb_augment_max=self.cfg['trn_augment_max_val'])
+        history_path = '%s/history.csv' % self.cpdir
+        gen_trn = self.batch_gen(data, idxs_trn, steps_trn, self.cfg['trn_augment_max_trn'], history_path)
+        gen_val = self.batch_gen(data, idxs_val, steps_val, self.cfg['trn_augment_max_val'])
 
         opt = self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args'])
         self.net.compile(optimizer=opt, loss=self.cfg['net_loss_func'], metrics=[F2, prec, reca] + tag_metrics())
@@ -175,12 +180,11 @@ class DenseNet121(object):
             ValidationCB(self.cfg['cpdir'], gen_val, self.cfg['trn_batch_size'], steps_val),
             HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
-            CSVLogger('%s/history.csv' % self.cpdir),
+            CSVLogger(history_path),
             ModelCheckpoint('%s/wvalf2.hdf5' % self.cpdir, monitor='val_F2', verbose=1,
                             save_best_only=True, mode='max'),
             ReduceLROnPlateau(monitor='F2', factor=0.1, patience=5,
                               min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max')
-
         ] + callbacks
 
         if self.cfg['trn_monitor_val']:
@@ -191,7 +195,7 @@ class DenseNet121(object):
 
         return train.history
 
-    def batch_gen(self, data, didxs, nb_steps, nb_augment_max, yield_didxs=False):
+    def batch_gen(self, data, didxs, nb_steps, nb_augment_max, history_path=None):
 
         imgs = data.get('images')
         tags = data.get('tags')[...]
@@ -203,10 +207,30 @@ class DenseNet121(object):
             lambda x: np.roll(x, rng.randint(1, x.shape[0]), axis=rng.choice([0, 1]))
         ]
 
+        # Lookup table for images of a specific tag.
+        tidxs = np.arange(len(TAGS))
+        tidx_to_didxs = [np.where(tags[didxs, ti] == 1)[0] for ti in tidxs]
+
+        # Probability distribution for sampling tag indexes.
+        normalize = lambda x: np.array(x) * 1. / np.sum(x)
+        tidxp = normalize([len(x) for x in tidx_to_didxs])
+
         while True:
 
-            rng.shuffle(didxs)
-            didxs_cycle = cycle(didxs)
+            # Update the tag probabilities s.t. tags with lowest f2 have highest probability.
+            if history_path and os.path.exists(history_path) and os.stat(history_path).st_size > 0:
+                df = pd.read_csv(history_path)
+                cols = sorted([c for c in df.columns if c.endswith('_f2')])
+                tidxp = [1 - df[c].values[-1] for c in cols]
+                tidxp = normalize(np.array(tidxp))
+                print([(t, x) for t, x in zip(TAGS, tidxp)])
+                sample = lambda: rng.choice(tidx_to_didxs[rng.choice(tidxs, p=tidxp)])
+
+            # Default cycling from randomized cycle.
+            else:
+                rng.shuffle(didxs)
+                didxs_cycle = cycle(didxs)
+                sample = lambda: next(didxs_cycle)
 
             for _ in range(nb_steps):
 
@@ -214,7 +238,7 @@ class DenseNet121(object):
                 tb = np.zeros(tb_shape, dtype=np.int16)
 
                 for bidx in range(self.cfg['trn_batch_size']):
-                    didx = next(didxs_cycle)
+                    didx = sample()
                     ib[bidx] = imresize(imgs[didx, ...], self.cfg['input_shape'])
                     tb[bidx] = tags[didx]
                     for aug in rng.choice(aug_funcs, rng.randint(0, nb_augment_max + 1)):
