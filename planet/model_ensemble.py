@@ -4,15 +4,17 @@ import logging
 import os
 import numpy as np
 import pandas as pd
+import pickle
 import sys
 from itertools import permutations
 from hyperopt import fmin, hp, space_eval, tpe, STATUS_OK, Trials
+from math import ceil
 from multiprocessing import Pool
 from operator import itemgetter
 from time import time
 from tqdm import tqdm
 sys.path.append('.')
-from planet.utils.data_utils import TAGS, optimize_thresholds, f2pr
+from planet.utils.data_utils import TAGS, TAGS_short, optimize_thresholds, f2pr
 from planet.utils.runtime import funcname
 from planet.model_runner import submission
 np.random.seed(int(time()))
@@ -23,10 +25,39 @@ NUM_OUTPUTS = len(TAGS)
 TIME = int(time())
 ENSEMBLE_DIR = 'ensembles'
 
-# this will be passed to pool
-def optimize_single_tag(yt_trn, yp_trn):
-    """ Takes two slices of arrays for a single tag and returns the weights"""
-    pass
+def optimize_single_tag(args):
+    """ Takes two slices of arrays for a single tag and returns the optimized weights"""
+    (tag_idx, yp_trn, yt_trn, nb_iter) = args
+    N_trn = yp_trn.shape[0]
+
+    tag_trials = Trials()
+    def objective(w, yt_trn=yt_trn, yp_trn=yp_trn):
+        f2_opt, thresh_opt, w = get_weighted_optimized_results(yt_trn, yp_trn, w)
+        if len(tag_trials.trials) > 1:
+            if f2_opt > -tag_trials.best_trial['result']['loss']:
+                logger = logging.getLogger(funcname())
+                logger.info('%2d - %s: hyperopt f2 improved from %lf to %lf' 
+                    % (tag_idx, TAGS_short[tag_idx], -tag_trials.best_trial['result']['loss'], f2_opt))
+        if len(tag_trials.trials) % ceil(nb_iter/10) == 0:
+                logger = logging.getLogger(funcname())
+                logger.info('%2d - %s: %d/%d: hyperopt f2 is %lf'
+                 % (tag_idx, TAGS_short[tag_idx], len(tag_trials.trials), nb_iter, -tag_trials.best_trial['result']['loss']))
+        return {
+            'loss':-f2_opt,
+            'status': STATUS_OK,
+            'thresholds': thresh_opt,
+            'weights': w,
+        }
+    # Build search space
+    weights_space_tag = [hp.uniform(str(i), 0, 1) for i in range(N_trn)]
+    total = 0
+    for s in weights_space_tag:
+        total += s
+    for i in range(len(weights_space_tag)):
+        weights_space_tag[i] /= total
+
+    best = fmin(objective, space=weights_space_tag, algo=tpe.suggest, max_evals=nb_iter, trials=tag_trials)
+    return space_eval(weights_space_tag, best)
 
 
 def get_weighted_yp(w, yp_all):
@@ -87,7 +118,7 @@ class EnsembleOptimizer(object):
         self.yp_trn_all = np.array(self.yp_trn_all)
         self.yp_tst_all = np.array(self.yp_tst_all)
 
-    def fit(self, yt_trn, nb_iter=5, use_hyperopt=True, use_rand_search=True, max_parallel=1):
+    def fit(self, yt_trn, nb_iter=5, use_hyperopt=True, use_rand_search=False, max_parallel=4):
         logger = logging.getLogger(funcname())
         np.set_printoptions(formatter={'float': '{: 0.3f}'.format})
 
@@ -104,7 +135,7 @@ class EnsembleOptimizer(object):
 
 
         # Try using each member individually.
-        try_individually = True
+        try_individually = False
         if try_individually:
             w = np.zeros((N_trn, NUM_OUTPUTS), dtype=np.float16)
             for it in range(N_trn):
@@ -121,48 +152,23 @@ class EnsembleOptimizer(object):
                         # serialize_ensemble(f2_opt, thresh_opt, w, names_tst, yp_tst_all, self.yp_trn_all, self.paths_yp_trn)
 
         if use_hyperopt:
-            optimize_individually = False
-            self.trials = Trials()
+            optimize_individually = True
             if optimize_individually:
-                logger.warning("This probably doesn't work yet")
-                def optimize_single_tag(tag_idx, self=self, yt_trn=yt_trn):
-                    yt_trn = yt_trn[:, tag_idx]
-                    yp_trn = self.yp_trn_all[:,:,tag_idx]
-                    def objective(w, self=self, yt_trn=yt_trn, yp_trn=yp_trn):
-                        # TODO: Need to make matrix math work with weights for an individual tag
-                        f2_opt, thresh_opt, w = get_weighted_optimized_results(yt_trn, yp_trn, w)
-                        if len(self.trials.trials) > 1:
-                            if f2_opt > -self.trials.best_trial['result']['loss']:
-                                logger = logging.getLogger(funcname())
-                                logger.info('hyperopt f2 improved from %lf to %lf' % (-self.trials.best_trial['result']['loss'], f2_opt))
-                        return {
-                            'loss':-f2_opt,
-                            'status': STATUS_OK,
-                            'thresholds': thresh_opt,
-                            'weights': w,
-                        }
-                    # Build search space
-                    weights_space_tag = [hp.uniform(str(i), 0, 1) for i in range(N_trn)]
-                    total = 0
-                    for s in weights_space_tag:
-                        total += s
-                    for i in range(len(weights_space_tag)):
-                        weights_space_tag[i] /= total
-
-                    best = fmin(objective, space=weights_space_tag, algo=tpe.suggest, max_evals=nb_iter, trials=self.trials)
-                    return space_eval(weights_space_tag, best)
+                logging.getLogger("hyperopt.tpe").setLevel(logging.WARNING)
                 if max_parallel == 1:
                     tag_weights = []
                     for tag_idx in range(NUM_OUTPUTS):
-                        tag_weights.append(optimize_tag_weights(tag_idx))
+                        logger.info("Optimizing tag %d" % tag_idx)
+                        tag_weights.append(optimize_single_tag(tag_idx, self.yp_trn_all[:,:,tag_idx], yt_trn[:, tag_idx], nb_iter))
                 else:
                     p = Pool(min(max_parallel, NUM_OUTPUTS))
-                    tag_weights = p.map(optimize_tag_weights, range(NUM_OUTPUTS))
-                w = np.array(tag_weights)
+                    tag_weights = p.map(optimize_single_tag, [(tag_idx, self.yp_trn_all[:,:,tag_idx], yt_trn[:, tag_idx], nb_iter) for tag_idx in range(NUM_OUTPUTS)])
+                w = np.transpose(tag_weights)
                 f2_opt, thresh_opt, w = get_weighted_optimized_results(yt_trn, self.yp_trn_all, w)
-
+                logger.info("Optimized weights: f2 = %f" % f2_opt)
                 results.append((f2_opt, thresh_opt, w))
             else:
+                self.trials = Trials()
                 def objective(w, self=self, yt_trn=yt_trn):
                     w = np.array(w).reshape((N_trn, NUM_OUTPUTS))
                     f2_opt, thresh_opt, w = get_weighted_optimized_results(yt_trn, self.yp_trn_all, w)
@@ -208,7 +214,7 @@ class EnsembleOptimizer(object):
                     if f2_opt > results[best_idx][0]:
                         old_best = results[best_idx][0]
                         best_idx = len(results)-1
-                        logger.info('%-05.2lf: f2 improved from %lf to %lf:\n%s' % ((it / nb_iter * 100), old_best, f2_opt, w))
+                        logger.info('%-05.2lf: f2 improved from %lf to %lf:\n' % ((it / nb_iter * 100), old_best, f2_opt))
                         # serialize_ensemble(f2_opt, thresh_opt, w, names_tst, yp_tst_all, self.yp_trn_all, self.paths_yp_trn)
 
                 if it % 50 == 0:
