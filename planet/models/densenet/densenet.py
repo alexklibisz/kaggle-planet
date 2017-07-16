@@ -53,7 +53,7 @@ def _loss_wbc(yt, yp):
 
 class FineTuneCB(Callback):
 
-    def __init__(self, frozen_up_to_idx=1, unfreeze_epoch=-1, unfreeze_lr_mult=1):
+    def __init__(self, frozen_up_to_idx=0, unfreeze_epoch=-1, unfreeze_lr_mult=1):
         super().__init__()
         self.frozen_up_to_idx = frozen_up_to_idx
         self.unfreeze_epoch = unfreeze_epoch
@@ -221,7 +221,7 @@ class DenseNet121(object):
             HistoryPlotCB('%s/history.png' % self.cpdir),
             EarlyStopping(monitor='F2', min_delta=0.01, patience=20, verbose=1, mode='max'),
             CSVLogger('%s/history.csv' % self.cpdir),
-            ModelCheckpoint('%s/model_{val_F2:.2f}_{epoch:02d}.hdf5' % self.cpdir,
+            ModelCheckpoint('%s/model_{val_F2:.4f}_{epoch:02d}.hdf5' % self.cpdir,
                             monitor='val_F2', verbose=1, save_best_only=False, mode='max'),
             ReduceLROnPlateau(monitor='F2', factor=0.1, patience=5,
                               min_lr=1e-4, epsilon=1e-2, verbose=1, mode='max')
