@@ -9,7 +9,7 @@ import sys
 from itertools import permutations
 from hyperopt import fmin, hp, space_eval, tpe, STATUS_OK, Trials
 from math import ceil
-from multiprocessing import Pool
+from multiprocessing import Pool, cpu_count
 from operator import itemgetter
 from time import time
 from tqdm import tqdm
@@ -118,7 +118,7 @@ class EnsembleOptimizer(object):
         self.yp_trn_all = np.array(self.yp_trn_all)
         self.yp_tst_all = np.array(self.yp_tst_all)
 
-    def fit(self, yt_trn, nb_iter=5, use_hyperopt=True, use_rand_search=False, max_parallel=4):
+    def fit(self, yt_trn, nb_iter=5, use_hyperopt=True, use_rand_search=False, max_parallel=cpu_count()):
         logger = logging.getLogger(funcname())
         np.set_printoptions(formatter={'float': '{: 0.3f}'.format})
 
@@ -252,7 +252,7 @@ if __name__ == "__main__":
     data_tst = h5py.File(hdf5_path_tst, 'r')
     names_tst = data_tst.attrs['names'].split(',')
 
-    results = ens_opt.fit(yt_trn, nb_iter=int(sys.argv[2]))#, max_parallel=NUM_OUTPUTS)
+    results = ens_opt.fit(yt_trn, nb_iter=int(sys.argv[2]))
 
     # Make submissions with best 10 results.
     results = sorted(results, key=lambda x: x[0], reverse=True)[:10]
