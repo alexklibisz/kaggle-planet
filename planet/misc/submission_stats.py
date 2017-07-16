@@ -59,9 +59,10 @@ if __name__ == "__main__":
         logger.info('Key: %s %s %s %s' % (colored('> 0.9', 'green'), colored('> 0.8', 'yellow'),
                                           colored('> 0.7', 'magenta'), colored('< 0.7', 'red')))
 
-    if TRAINING:
+        f2, p, r = f2pr(yt, yp)
+        logger.info('Aggregate: f2=%.3lf prec=%.3lf reca=%.3lf' % (f2, p, r))
 
-            # Scatter plot metrics vs. their proportion of positives.
+        # Scatter plot metrics vs. their proportion of positives.
         fig, _ = plt.subplots(1, 3, figsize=(10, 5))
         [axf2, axprec, axreca] = fig.axes
         axf2.set_ylabel('F2')
@@ -77,3 +78,5 @@ if __name__ == "__main__":
             axprec.scatter([pos_yt], [p])
             axreca.scatter([pos_yt], [r])
         plt.show()
+    
+    
