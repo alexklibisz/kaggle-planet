@@ -6,6 +6,7 @@ import tensorflow as tf
 
 
 def make_parallel(model, gpu_count):
+
     def get_slice(data, idx, parts):
         shape = tf.shape(data)
         size = tf.concat([shape[:1] // parts, shape[1:]], axis=0)
@@ -44,4 +45,11 @@ def make_parallel(model, gpu_count):
         for outputs in outputs_all:
             merged.append(merge(outputs, mode='concat', concat_axis=0))
 
-        return Model(input=model.inputs, output=merged)
+        new_model = Model(input=model.inputs, output=merged)
+        funcType = type(model.save)
+
+        # monkeypatch the save to save just the underlying model
+        def new_save(self_, filepath, overwrite=True):
+            model.save(filepath, overwrite)
+        new_model.save = funcType(new_save, new_model)
+        return new_model
