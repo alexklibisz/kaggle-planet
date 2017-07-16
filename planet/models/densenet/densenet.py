@@ -76,18 +76,28 @@ class FineTuneCB(Callback):
             logger.info('Epoch %d: new learning rate %.4lf.' % (epoch, K.get_value(self.model.optimizer.lr)))
 
 
+def preprocess_pretrained(x):
+    """Switch RGB -> BGR and follow preprocessing from: https://goo.gl/nR2j6D and https://goo.gl/a8fkve"""
+    B = (x[:, :, :, 2:3] * 1. - 103.94) * 0.017
+    G = (x[:, :, :, 1:2] * 1. - 116.78) * 0.017
+    R = (x[:, :, :, 0:1] * 1. - 123.68) * 0.017
+    return K.concatenate([B, G, R], axis=-1)
+
+
+def preprocess(x):
+    """Mean subtraction, normalization based on training dataset."""
+    R = (x[:, :, :, 0:1] * 1. - IMG_MEAN_JPG_TRN[0]) / IMG_STDV_JPG_TRN[0]
+    G = (x[:, :, :, 1:2] * 1. - IMG_MEAN_JPG_TRN[1]) / IMG_STDV_JPG_TRN[1]
+    B = (x[:, :, :, 2:3] * 1. - IMG_MEAN_JPG_TRN[2]) / IMG_STDV_JPG_TRN[2]
+    return K.concatenate([B, G, R], axis=-1)
+
+
 def _densenet121(input_shape=(256, 256, 3), pretrained=False):
 
     from planet.models.densenet.DN121 import densenet121_model
 
-    def preprocess(x):
-        """Switch RGB -> BGR and follow preprocessing from: https://goo.gl/nR2j6D and https://goo.gl/a8fkve"""
-        B = (x[:, :, :, 2:3] * 1. - 103.94) * 0.017
-        G = (x[:, :, :, 1:2] * 1. - 116.78) * 0.017
-        R = (x[:, :, :, 0:1] * 1. - 123.68) * 0.017
-        return K.concatenate([B, G, R], axis=-1)
-
-    preprocess = Lambda(preprocess, input_shape=input_shape, name='preprocsss')
+    ppf = preprocess_pretrained if pretrained else preprocsss
+    preprocess = Lambda(ppf, input_shape=input_shape, name='preprocsss')
     dns = densenet121_model(img_rows=input_shape[0], img_cols=input_shape[1], color_type=input_shape[2],
                             dropout_rate=0.0, pretrained=pretrained, preprocess_layer=preprocess)
     shared_out = dns.output
@@ -102,14 +112,8 @@ def _densenet169(input_shape=(256, 256, 3), pretrained=False):
 
     from planet.models.densenet.DN169 import densenet169_model
 
-    def preprocess(x):
-        """Switch RGB -> BGR and follow preprocessing from: https://goo.gl/nR2j6D and https://goo.gl/a8fkve"""
-        B = (x[:, :, :, 2:3] * 1. - 103.94) * 0.017
-        G = (x[:, :, :, 1:2] * 1. - 116.78) * 0.017
-        R = (x[:, :, :, 0:1] * 1. - 123.68) * 0.017
-        return K.concatenate([B, G, R], axis=-1)
-
-    preprocess = Lambda(preprocess, input_shape=input_shape, name='preprocess')
+    ppf = preprocess_pretrained if pretrained else preprocsss
+    preprocess = Lambda(ppf, input_shape=input_shape, name='preprocsss')
     dns = densenet169_model(img_rows=input_shape[0], img_cols=input_shape[1], color_type=input_shape[2],
                             dropout_rate=0.2, pretrained=pretrained, preprocess_layer=preprocess)
     shared_out = dns.output
