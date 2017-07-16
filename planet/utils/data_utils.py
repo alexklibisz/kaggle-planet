@@ -282,24 +282,24 @@ def tags_f2pr(yt, yp, thresholds):
     return f2pr(yt, yp, axis=0)
 
 
-def _tags_f2pr(yt, yp, thresholds_to_try):
-    """Given a matrix of yt and yp, where each row is a separate prediction and each column
-    is for a separate tag, this returns a F2 scores, recall, and precision for each tag
-    for each threshold in the thresholds_to_try array."""
+# def _tags_f2pr(yt, yp, thresholds_to_try):
+#     """Given a matrix of yt and yp, where each row is a separate prediction and each column
+#     is for a separate tag, this returns a F2 scores, recall, and precision for each tag
+#     for each threshold in the thresholds_to_try array."""
 
-    yp = (yp > thresholds_to_try[:, None, None]).astype(np.uint8)
-    yt = yt[None, :, :]
-    # get f2pr collapsing along rows axis
-    return f2pr(yt, yp, axis=1)
+#     yp = (yp > thresholds_to_try[:, None, None]).astype(np.uint8)
+#     yt = yt[None, :, :]
+#     # get f2pr collapsing along rows axis
+#     return f2pr(yt, yp, axis=1)
 
-def _tag_f2pr(yt, yp, thresholds_to_try):
-    """Given a matrix of yt and yp, where each row is a separate prediction, 
-    this returns a F2 scores, recall, and precision for each tag
-    for each threshold in the thresholds_to_try array."""
-    yp = (yp > thresholds_to_try[:, None]).astype(np.uint8)
-    yt = yt[None, :]
-    # get f2pr collapsing along rows axis
-    return f2pr(yt, yp, axis=1)
+# def _tag_f2pr(yt, yp, thresholds_to_try):
+#     """Given a matrix of yt and yp, where each row is a separate prediction, 
+#     this returns a F2 scores, recall, and precision for each tag
+#     for each threshold in the thresholds_to_try array."""
+#     yp = (yp > thresholds_to_try[:, None]).astype(np.uint8)
+#     yt = yt[None, :]
+#     # get f2pr collapsing along rows axis
+#     return f2pr(yt, yp, axis=1)
 
 def f2pr(yt, yp, axis=None):
     """Given a matrix of yt and yp, where each row is a separate prediction and each column
@@ -320,13 +320,28 @@ def f2pr(yt, yp, axis=None):
     return f2, p, r
 
 
-def optimize_thresholds(yt, yp, n=101):
-    thresholds_to_try = np.linspace(0, 1, n)
-    if (len(yt.shape) < 2):
-        f2, r, p = _tag_f2pr(yt, yp, thresholds_to_try)
-    else:
-        f2, r, p = _tags_f2pr(yt, yp, thresholds_to_try)
+# def optimize_thresholds(yt, yp, n=101):
+#     """ Warning: this won't work quite right if there are no true positives for a tag"""
+#     thresholds_to_try = np.linspace(0, 1, n)
+#     if (len(yt.shape) < 2):
+#         f2, r, p = _tag_f2pr(yt, yp, thresholds_to_try)
+#     else:
+#         f2, r, p = _tags_f2pr(yt, yp, thresholds_to_try)
 
-    # Find the thresholds that gave the highest f2 score
-    best_indices = np.argmax(f2, axis=0)
-    return thresholds_to_try[best_indices]
+#     # Find the thresholds that gave the highest f2 score
+#     best_indices = np.argmax(f2, axis=0)
+#     return thresholds_to_try[best_indices]
+
+def optimize_thresholds(yt, yp, n = 101):
+    thresholds_to_try = np.linspace(0, 1, n)
+    best_threshold = [0.2]*yp.shape[1]
+    for tag_idx in range(yp.shape[1]):
+        best_f2 = 0
+        thresh = [0.2]*yp.shape[1]
+        for val in thresholds_to_try:
+            thresh[tag_idx] = val
+            current_f2,p,r = f2pr(yt, yp > thresh)
+            if current_f2 > best_f2:
+                best_f2 = current_f2
+                best_threshold[tag_idx] = val
+    return best_threshold
