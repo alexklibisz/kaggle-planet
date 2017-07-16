@@ -49,20 +49,23 @@ def tag_metrics():
     # Generate an F2 metric for each tag.
     metrics = []
     for i, t in enumerate(TAGS):
-        @rename('%s_prec' % t[:4].upper())
-        def tagp(yt, yp, i=i):
-            return prec(yt[:, i], yp[:, i])
-        metrics.append(tagp)
 
-        @rename('%s_reca' % t[:4].upper())
-        def tagr(yt, yp, i=i):
-            return reca(yt[:, i], yp[:, i])
-        metrics.append(tagr)
+        # @rename('%s_acc' % t[:4])
+        # def acc(yt, yp, i=i):
+        #     return K.sum(K.cast(yt[:, i] == yp[:, i], 'float')) / K.sum(K.clip(yt[:, i], 1, 1))
+        # metrics.append(tmp)
 
-        @rename('%s_f2' % t[:4].upper())
-        def tagf(yt, yp, i=i):
+        @rename('%s_dif' % t[:4])
+        def tmp(yt, yp, i=i):
+            t = K.sum(yt[:, i]) / K.sum(K.clip(yt[:, i], 1, 1))
+            p = K.sum(yp[:, i]) / K.sum(K.clip(yp[:, i], 1, 1))
+            return p - t
+        metrics.append(tmp)
+
+        @rename('%s_f2' % t[:4])
+        def tmp(yt, yp, i=i):
             return F2(yt[:, i], yp[:, i])
-        metrics.append(tagf)
+        metrics.append(tmp)
 
     return metrics
 
@@ -82,63 +85,6 @@ class ThresholdedSigmoid(Layer):
         config = {'lower': float(self.lower), 'upper': float(self.upper)}
         base_config = super(ThresholdedSigmoid, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
-
-
-# class ParamStatsCB(Callback):
-#     '''Compute metrics about network parameters over time.'''
-
-#     def __init__(self, cpdir):
-#         super(Callback, self).__init__()
-#         self.cpdir = cpdir
-#         self.trainable_lidxs = []
-#         self.lidx_w_prev = None
-#         self.lidx_b_prev = None
-#         self.lidx_wstd = None
-#         self.lidx_b_std = None
-#         self.lidx_wratio = None
-#         self.lidx_b_ratio = None
-#         self.counter = 0
-
-#     def on_train_begin(self, logs):
-#         self.trainable_lidxs = [i for i, l in enumerate(self.model.layers)
-#                                 if len(l.trainable_weights) > 0]
-#         self.lidx_wb_prev = {li: None for li in self.trainable_lidxs}
-#         self.lidx_wstats = {li: [] for li in self.trainable_lidxs}
-#         self.lidx_wratio = {li: [] for li in self.trainable_lidxs}
-
-#     def on_batch_end(self, batch, logs):
-#         '''Compute metrics and update for next iteration.'''
-
-#         if batch % 10:
-#             return
-
-#         lidx_wb = {li: self.model.layers[li].get_weights()[0:] for li in self.trainable_lidxs}
-
-#         # Compute comparisons against previous weights.
-#         # - Standard deviation of weights.
-#         # - Ratio of weight magnitude to the most recent update delta.
-#         if self.counter > 0:
-#             for li in self.trainable_lidxs:
-#                 w0 = self.lidx_wb_prev[li][0]
-#                 w1 = lidx_wb[li][0]
-#                 self.lidx_wstats[li].append((np.mean(w1), np.var(w1)))
-#                 self.lidx_wratio[li].append(np.mean(np.abs(w1 - w0) / (np.abs(w1) + 1e-7)))
-
-#         self.lidx_wb_prev = lidx_wb
-#         self.counter += 1
-
-#     def on_epoch_end(self, epoch, logs):
-#         '''Print metrics for this epoch and save metrics to disk.'''
-#         print('\n Epoch %d: mean stats for each layer:' % (epoch))
-#         for li in self.trainable_lidxs:
-#             layer = self.model.layers[li]
-#             means = [m for m, s in self.lidx_wstats[li][-self.counter:]]
-#             varcs = [s for m, s in self.lidx_wstats[li][-self.counter:]]
-#             print('%-30s w mean=%-8.4lf w variance=%-8.4lf' % (layer.name, np.mean(means), np.mean(varcs)))
-#         self.counter = 0
-#         payload = {'lidx_wstats': self.lidx_wstats, 'lidx_wratio': self.lidx_wratio}
-#         with open('%s/param_stats.pkl' % self.cpdir, 'wb') as f:
-#             pkl.dump(payload, f)
 
 
 class TensorBoardWrapper(TensorBoard):
@@ -171,9 +117,8 @@ class ValidationCB(Callback):
         self.batch_size = batch_size
         self.batch_gen = batch_gen
         self.nb_steps = nb_steps
-        self.metrics = {'f2': [], 'prec': [], 'reca': []}
-        self.tag_metrics = {t: {'f2': [], 'prec': [], 'reca': []} for t in TAGS}
-        self.best_thresholds = []
+        self.best_metric = 0.
+        self.best_epoch = 0.
         assert os.path.exists(self.cpdir)
 
     def on_epoch_end(self, epoch, logs):
@@ -189,50 +134,44 @@ class ValidationCB(Callback):
         for bidx in tqdm(range(self.nb_steps)):
             ib, tb = next(self.batch_gen)
             yt[bidx * self.batch_size:(bidx + 1) * self.batch_size] = tb
-            yp[bidx * self.batch_size:(bidx + 1) * self.batch_size] = self.model.predict(ib)
+            yp[bidx * self.batch_size:(bidx + 1) * self.batch_size] = self.model.predict_on_batch(ib)
 
-        # Find the optimal thresholds
+        # Find optimal thresholds.
         thresholds = optimize_thresholds(yt, yp)
-        self.best_thresholds.append(thresholds)
-        yp = (yp > thresholds).astype(np.uint8)
+        yp_opt = (yp > thresholds).astype(np.uint8)
 
-        # Metrics per tag.
-        for tidx, tag in enumerate(TAGS):
-            self.tag_metrics[tag]['f2'].append(fbeta_score(yt[:, tidx], yp[:, tidx], beta=2.))
-            self.tag_metrics[tag]['prec'].append(precision_score(yt[:, tidx], yp[:, tidx]))
-            self.tag_metrics[tag]['reca'].append(recall_score(yt[:, tidx], yp[:, tidx]))
-
-        # Mean metrics across all examples.
-        f2, prec, reca = f2pr(yt, yp)
-        self.metrics['f2'].append(f2)
-        self.metrics['prec'].append(prec)
-        self.metrics['reca'].append(reca)
-
-        # Record Keras metrics.
-        logs['val_F2'] = f2
-        logs['val_prec'] = prec
-        logs['val_reca'] = reca
-
-        # Print per-tag metrics.
+        # Print per-tag metrics with stress-inducing colors.
         logger = logging.getLogger(funcname())
-        for tag in TAGS:
-            tm = self.tag_metrics[tag]
-            s = '%-20s F2=%.5lf Prec=%.5lf Reca=%.5lf' % (tag, tm['f2'][-1], tm['prec'][-1], tm['reca'][-1])
-            if tm['f2'][-1] > 0.9:
+        for tidx in range(len(TAGS)):
+            f2, p, r = f2pr(yt[:, tidx], yp_opt[:, tidx])
+            s = '%-20s F2=%.3lf p=%.3lf r=%.3lf t=%.3lf' % (TAGS[tidx], f2, p, r, thresholds[tidx])
+            if f2 > 0.9:
                 s = colored(s, 'green')
-            elif tm['f2'][-1] > 0.8:
+            elif f2 > 0.8:
                 s = colored(s, 'yellow')
             else:
                 s = colored(s, 'red')
             logger.info(s)
-        logger.info('Best thresholds: %s' % self.best_thresholds[-1])
 
-        # # Save to disk.
-        # payload = {'metrics': self.metrics, 'tag_metrics': self.tag_metrics, 'yt': yt, 'yp': yp}
-        # p = '%s/val_data_%d.pkl' % (self.cpdir, epoch)
-        # with open(p, 'wb') as fp:
-        #     pkl.dump(payload, fp)
-        # copyfile(p, '%s/val_data_latest.pkl' % self.cpdir)
+        # Metrics on all predictions.
+        f2, p, r = f2pr(yt, (yp > 0.5))
+        logger.info('Unoptimized F2=%.3lf, p=%.3lf, r=%.3lf' % (f2, p, r))
+        f2, p, r = f2pr(yt, yp_opt)
+        logger.info('Optimized   F2=%.3lf, p=%.3lf, r=%.3lf' % (f2, p, r))
+
+        # Record optimized metrics.
+        logs['val_F2'] = f2
+        logs['val_prec'] = p
+        logs['val_reca'] = r
+
+        # Let em know you improved.
+        if f2 > self.best_metric:
+            logger.info('val_F2 improved from %.3lf to %.3lf %s!' % (self.best_metric, f2, u'\U0001F642'))
+            self.best_metric = f2
+            self.best_epoch = epoch
+        else:
+            logger.info('Last improvement %d epochs ago %s. Maybe next time!' %
+                        ((epoch - self.best_epoch), u'\U0001F625'))
 
 
 class HistoryPlotCB(Callback):

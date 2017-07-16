@@ -4,6 +4,7 @@ import psutil
 import sys
 import tensorflow as tf
 
+
 def funcname():
     return sys._getframe(1).f_code.co_name
 
@@ -11,9 +12,3 @@ def funcname():
 def memory_usage():
     proc = psutil.Process(os.getpid())
     return float(proc.memory_info().rss) / (10**9)
-
-def gpu_selection(visible_devices="1", memory_fraction=0.95):
-    os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
-    config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = memory_fraction
-    set_session(tf.Session(config=config))
