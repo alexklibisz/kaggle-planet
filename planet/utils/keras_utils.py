@@ -117,9 +117,8 @@ class ValidationCB(Callback):
         self.batch_size = batch_size
         self.batch_gen = batch_gen
         self.nb_steps = nb_steps
-        self.metrics = {'f2': [], 'prec': [], 'reca': []}
-        self.tag_metrics = {t: {'f2': [], 'prec': [], 'reca': []} for t in TAGS}
-        self.best_thresholds = []
+        self.best_metric = 0.
+        self.best_epoch = 0.
         assert os.path.exists(self.cpdir)
 
     def on_epoch_end(self, epoch, logs):
@@ -137,48 +136,42 @@ class ValidationCB(Callback):
             yt[bidx * self.batch_size:(bidx + 1) * self.batch_size] = tb
             yp[bidx * self.batch_size:(bidx + 1) * self.batch_size] = self.model.predict_on_batch(ib)
 
-        # Find the optimal thresholds
+        # Find optimal thresholds.
         thresholds = optimize_thresholds(yt, yp)
-        self.best_thresholds.append(thresholds)
-        yp = (yp > thresholds).astype(np.uint8)
+        yp_opt = (yp > thresholds).astype(np.uint8)
 
-        # Metrics per tag.
-        for tidx, tag in enumerate(TAGS):
-            self.tag_metrics[tag]['f2'].append(fbeta_score(yt[:, tidx], yp[:, tidx], beta=2.))
-            self.tag_metrics[tag]['prec'].append(precision_score(yt[:, tidx], yp[:, tidx]))
-            self.tag_metrics[tag]['reca'].append(recall_score(yt[:, tidx], yp[:, tidx]))
-
-        # Mean metrics across all examples.
-        f2, prec, reca = f2pr(yt, yp)
-        self.metrics['f2'].append(f2)
-        self.metrics['prec'].append(prec)
-        self.metrics['reca'].append(reca)
-
-        # Record Keras metrics.
-        logs['val_F2'] = f2
-        logs['val_prec'] = prec
-        logs['val_reca'] = reca
-
-        # Print per-tag metrics.
+        # Print per-tag metrics with stress-inducing colors.
         logger = logging.getLogger(funcname())
-        for tag in TAGS:
-            tm = self.tag_metrics[tag]
-            s = '%-20s F2=%.5lf Prec=%.5lf Reca=%.5lf' % (tag, tm['f2'][-1], tm['prec'][-1], tm['reca'][-1])
-            if tm['f2'][-1] > 0.9:
+        for tidx in range(len(TAGS)):
+            f2, p, r = f2pr(yt[:, tidx], yp_opt[:, tidx])
+            s = '%-20s F2=%.3lf p=%.3lf r=%.3lf t=%.3lf' % (TAGS[tidx], f2, p, r, thresholds[tidx])
+            if f2 > 0.9:
                 s = colored(s, 'green')
-            elif tm['f2'][-1] > 0.8:
+            elif f2 > 0.8:
                 s = colored(s, 'yellow')
             else:
                 s = colored(s, 'red')
             logger.info(s)
-        logger.info('Best thresholds: %s' % self.best_thresholds[-1])
 
-        # # Save to disk.
-        # payload = {'metrics': self.metrics, 'tag_metrics': self.tag_metrics, 'yt': yt, 'yp': yp}
-        # p = '%s/val_data_%d.pkl' % (self.cpdir, epoch)
-        # with open(p, 'wb') as fp:
-        #     pkl.dump(payload, fp)
-        # copyfile(p, '%s/val_data_latest.pkl' % self.cpdir)
+        # Metrics on all predictions.
+        f2, p, r = f2pr(yt, (yp > 0.5))
+        logger.info('Unoptimized F2=%.3lf, p=%.3lf, r=%.3lf' % (f2, p, r))
+        f2, p, r = f2pr(yt, yp_opt)
+        logger.info('Optimized   F2=%.3lf, p=%.3lf, r=%.3lf' % (f2, p, r))
+
+        # Record optimized metrics.
+        logs['val_F2'] = f2
+        logs['val_prec'] = p
+        logs['val_reca'] = r
+
+        # Let em know you improved.
+        if f2 > self.best_metric:
+            logger.info('val_F2 improved from %.3lf to %.3lf %s!' % (self.best_metric, f2, u'\U0001F642'))
+            self.best_metric = f2
+            self.best_epoch = epoch
+        else:
+            logger.info('Last improvement %d epochs ago %s. Maybe next time!' %
+                        ((epoch - self.best_epoch), u'\U0001F625'))
 
 
 class HistoryPlotCB(Callback):

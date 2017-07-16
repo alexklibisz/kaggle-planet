@@ -6,6 +6,7 @@ from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, CSVLogger, Early
 from keras.layers.advanced_activations import PReLU
 from keras.regularizers import l2
 from pprint import pprint
+from psutil import virtual_memory
 from scipy.misc import imresize
 from scipy.ndimage.interpolation import rotate
 from time import sleep, time
@@ -203,7 +204,6 @@ class DenseNet121(object):
     def serialize(self):
         self.net.save('%s/model.hdf5' % self.cpdir)
         json.dump(serialize_config(self.cfg), open('%s/config.json' % self.cpdir, 'w'))
-        pprint(self.cfg)
 
     def train(self, callbacks=[]):
 
@@ -218,6 +218,7 @@ class DenseNet121(object):
 
         opt = self.cfg['trn_optimizer'](**self.cfg['trn_optimizer_args'])
         self.net.compile(optimizer=opt, loss=self.cfg['net_loss_func'], metrics=[F2, prec, reca] + tag_metrics())
+        pprint(self.cfg)
 
         cb = [
             FineTuneCB(**self.cfg['trn_finetune_args']),
@@ -241,7 +242,8 @@ class DenseNet121(object):
 
     def batch_gen(self, data, didxs, nb_steps, nb_augment_max):
 
-        imgs = data.get('images')
+        ram = virtual_memory().total / 1024**3
+        imgs = data.get('images') if ram < 30 else data.get('images')[...]
         tags = data.get('tags')[...]
         ib_shape = (self.cfg['trn_batch_size'],) + self.cfg['input_shape']
         tb_shape = (self.cfg['trn_batch_size'], len(TAGS))
