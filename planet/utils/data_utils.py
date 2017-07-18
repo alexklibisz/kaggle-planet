@@ -334,10 +334,14 @@ def f2pr(yt, yp, axis=None):
 
 def optimize_thresholds(yt, yp, n = 101):
     thresholds_to_try = np.linspace(0, 1, n)
-    best_threshold = [0.2]*yp.shape[1]
-    for tag_idx in range(yp.shape[1]):
+    if len(yt.shape) < 2:
+        num_tags = 1
+    else:
+        num_tags = yp.shape[1]
+    best_threshold = [0.2]*num_tags
+    for tag_idx in range(num_tags):
         best_f2 = 0
-        thresh = [0.2]*yp.shape[1]
+        thresh = [0.2]*num_tags
         for val in thresholds_to_try:
             thresh[tag_idx] = val
             current_f2,p,r = f2pr(yt, yp > thresh)
