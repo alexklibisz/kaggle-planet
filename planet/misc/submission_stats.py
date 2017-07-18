@@ -78,5 +78,24 @@ if __name__ == "__main__":
             axprec.scatter([pos_yt], [p])
             axreca.scatter([pos_yt], [r])
         plt.show()
-    
-    
+
+    # Bar graph comparing distributions of the two datasets.
+
+    fig, _ = plt.subplots(1, 3, figsize=(12, 4))
+    [ax1, ax2, ax3] = fig.axes
+    ax1.bar(np.arange(len(TAGS)), np.sum(yt, axis=0) / yt.shape[0])
+    ax1.set_xticks(np.arange(len(TAGS)))
+    ax1.set_xticklabels([t[:4] for t in TAGS], rotation='vertical')
+    ax1.set_ylim(0, 1)
+    ax1.set_title('Ground-truth positive proportions.')
+    ax2.bar(np.arange(len(TAGS)), np.sum(yp, axis=0) / yp.shape[0])
+    ax2.set_xticks(np.arange(len(TAGS)))
+    ax2.set_xticklabels([t[:4] for t in TAGS], rotation='vertical')
+    ax2.set_ylim(0, 1)
+    ax2.set_title('Predicted positive proportions.')
+    ax3.bar(np.arange(len(TAGS)), (np.sum(yp, axis=0) / yp.shape[0]) - (np.sum(yt, axis=0) / yt.shape[0]))
+    ax3.set_xticks(np.arange(len(TAGS)))
+    ax3.set_xticklabels([t[:4] for t in TAGS], rotation='vertical')
+    ax3.set_ylim(-0.5, 0.5)
+    ax3.set_title('Difference (predicted - ground truth)')
+    plt.show()

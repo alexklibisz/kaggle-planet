@@ -70,6 +70,31 @@ def tag_metrics():
     return metrics
 
 
+class FineTuneCB(Callback):
+
+    def __init__(self, frozen_up_to_idx=0, unfreeze_epoch=-1, unfreeze_lr_mult=1):
+        super().__init__()
+        self.frozen_up_to_idx = frozen_up_to_idx
+        self.unfreeze_epoch = unfreeze_epoch
+        self.unfreeze_lr_mult = unfreeze_lr_mult
+
+    def on_train_begin(self, logs):
+        logger = logging.getLogger(funcname())
+        for idx, layer in enumerate(self.model.layers[:self.frozen_up_to_idx]):
+            layer.trainable = False
+            logger.info('Freezing layer %d: %s' % (idx, layer.name))
+
+    def on_epoch_begin(self, epoch, logs):
+        if epoch == self.unfreeze_epoch:
+            logger = logging.getLogger(funcname())
+            for idx, layer in enumerate(self.model.layers):
+                layer.trainable = True
+                logger.info('Unfreezing layer %d: %s' % (idx, layer.name))
+            lr = K.get_value(self.model.optimizer.lr) * self.unfreeze_lr_mult
+            K.set_value(self.model.optimizer.lr, lr)
+            logger.info('Epoch %d: new learning rate %.4lf.' % (epoch, K.get_value(self.model.optimizer.lr)))
+
+
 class ThresholdedSigmoid(Layer):
 
     def __init__(self, lower=0.2, upper=0.8, **kwargs):
@@ -128,6 +153,8 @@ class ValidationCB(Callback):
         3. Store the metrics and predictions in a pickle file in the cpdir.
         '''
 
+        logger = logging.getLogger(funcname())
+
         # Make predictions and store all true and predicted tags.
         yt = np.zeros((self.batch_size * self.nb_steps, len(TAGS)))
         yp = np.zeros((self.batch_size * self.nb_steps, len(TAGS)))
@@ -141,9 +168,12 @@ class ValidationCB(Callback):
         yp_opt = (yp > thresholds).astype(np.uint8)
 
         # Print per-tag metrics with stress-inducing colors.
-        logger = logging.getLogger(funcname())
+        tags_f2, tags_p, tags_r = [], [], []
         for tidx in range(len(TAGS)):
             f2, p, r = f2pr(yt[:, tidx], yp_opt[:, tidx])
+            tags_f2.append(f2)
+            tags_p.append(p)
+            tags_r.append(p)
             s = '%-20s F2=%.3lf p=%.3lf r=%.3lf t=%.3lf' % (TAGS[tidx], f2, p, r, thresholds[tidx])
             if f2 > 0.9:
                 s = colored(s, 'green')
@@ -153,11 +183,18 @@ class ValidationCB(Callback):
                 s = colored(s, 'red')
             logger.info(s)
 
+        # Metric variance across tags.
+        logs['val_f2_var'] = np.var(tags_f2)
+        logs['val_prec_var'] = np.var(tags_p)
+        logs['val_reca_var'] = np.var(tags_r)
+
         # Metrics on all predictions.
         f2, p, r = f2pr(yt, (yp > 0.5))
         logger.info('Unoptimized F2=%.3lf, p=%.3lf, r=%.3lf' % (f2, p, r))
         f2, p, r = f2pr(yt, yp_opt)
         logger.info('Optimized   F2=%.3lf, p=%.3lf, r=%.3lf' % (f2, p, r))
+        logger.info('Variance    F2=%.3lf, p=%.3lf, r=%.3lf' %
+                    (logs['val_f2_var'], logs['val_prec_var'], logs['val_reca_var']))
 
         # Record optimized metrics.
         logs['val_F2'] = f2
