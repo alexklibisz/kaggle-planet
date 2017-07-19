@@ -42,6 +42,11 @@ IMG_STDV_JPG_TRN = (38.78731346, 33.77907741, 32.63850828)
 IMG_MEAN_TIF_TRN = (4988.75696302, 4270.74552695, 3074.87909779, 6398.84897763)
 IMG_STDV_TIF_TRN = ()
 
+TAGS_DISTRIBUTION = np.asarray((0.30423182,  0.00837471,  0.02129499,  0.00820178,  0.00242101,
+                                0.70236419,  0.05160701,  0.00247042,  0.11060056,  0.09041725,
+                                0.06662714,  0.17937696,  0.92672744,  0.19938734,  0.00839942,
+                                0.00516317,  0.18308259))
+
 
 def tag_proportions(csvpath='data/train_v2.csv'):
     df = pd.read_csv(csvpath)
@@ -302,10 +307,14 @@ def f2pr(yt, yp, axis=None):
 
 def optimize_thresholds(yt, yp, n=101):
     thresholds_to_try = np.linspace(0, 1, n)
-    best_threshold = [0.2] * yp.shape[1]
-    for tag_idx in range(yp.shape[1]):
+    if len(yt.shape) < 2:
+        num_tags = 1
+    else:
+        num_tags = yp.shape[1]
+    best_threshold = [0.2] * num_tags
+    for tag_idx in range(num_tags):
         best_f2 = 0
-        thresh = [0.2] * yp.shape[1]
+        thresh = [0.2] * num_tags
         for val in thresholds_to_try:
             thresh[tag_idx] = val
             current_f2, p, r = f2pr(yt, yp > thresh)
