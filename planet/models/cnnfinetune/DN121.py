@@ -14,7 +14,7 @@ import keras.backend as K
 from sklearn.metrics import log_loss
 
 # from custom_layers.scale_layer import Scale
-from planet.models.densenet.scale_layer import Scale
+from planet.models.cnnfinetune.scale_layer import Scale
 
 
 def densenet121_model(img_rows, img_cols, color_type=1, nb_dense_block=4, growth_rate=32, nb_filter=64, reduction=0.5,
